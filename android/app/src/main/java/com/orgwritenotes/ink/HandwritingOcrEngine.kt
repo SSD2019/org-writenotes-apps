@@ -78,8 +78,11 @@ object HandwritingOcrEngine {
 
         // 1. Extract any explicit SVG <text> nodes
         val textRegex = Regex("<text[^>]*>(.*?)</text>", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
-        for (m in textRegex.findAll(svgXml)) {
-            val clean = m.groupValues[1].replace(Regex("<[^>]+>"), "").trim()
+        // One Matcher per scan: Regex.findAll re-creates (and re-copies the whole input) per match.
+        val textMatcher = textRegex.toPattern().matcher(svgXml)
+        val tagRegex = Regex("<[^>]+>")
+        while (textMatcher.find()) {
+            val clean = textMatcher.group(1).orEmpty().replace(tagRegex, "").trim()
             if (clean.isNotEmpty()) {
                 lines.add(clean)
             }
@@ -108,18 +111,21 @@ object HandwritingOcrEngine {
         val pathRegex = Regex("<path\\b[^>]*\\bd=[\"']([^\"']+)[\"'][^>]*>", RegexOption.IGNORE_CASE)
         val numRegex = Regex("([+-]?(?:\\d+\\.\\d*|\\d*\\.\\d+|\\d+))|[MmLlCcQqZzHhVv]")
 
-        for (match in pathRegex.findAll(svgXml)) {
-            val fullTag = match.value
+        val pathMatcher = pathRegex.toPattern().matcher(svgXml)
+        while (pathMatcher.find()) {
+            val fullTag = pathMatcher.group()
             if (fullTag.contains("pagerect") || fullTag.contains("pagebg") || fullTag.contains("leftmargin") ||
                 fullTag.contains("ruleline") || fullTag.contains("yrule") || fullTag.contains("xrule")) {
                 continue
             }
-            val dAttr = match.groupValues[1]
+            val dAttr = pathMatcher.group(1).orEmpty()
             val pts = mutableListOf<Pt>()
             var curX = 0f
             var curY = 0f
             var cmd = 'M'
-            val tokens = numRegex.findAll(dAttr).map { it.value }.toList()
+            val tokens = ArrayList<String>()
+            val numMatcher = numRegex.toPattern().matcher(dAttr)
+            while (numMatcher.find()) tokens.add(numMatcher.group())
             var i = 0
             while (i < tokens.size) {
                 val tok = tokens[i]

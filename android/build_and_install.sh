@@ -15,9 +15,9 @@ export PATH="$JAVA_HOME/bin:$SDK_DIR/gradle-8.6/bin:$SDK_DIR/platform-tools:$PAT
 
 cd "$ANDROID_DIR"
 echo "=== [1/2] Building APK & C++ JNI Library (liborgwritenotes_jni.so) ==="
-gradle assembleDebug --no-daemon --console=plain --project-cache-dir /home/saisan/.gradle/org-writenotes-project-cache
+gradle assembleRelease --no-daemon --console=plain --project-cache-dir /home/saisan/.gradle/org-writenotes-project-cache
 
-APK_PATH="$ANDROID_DIR/app/build/outputs/apk/debug/app-debug.apk"
+APK_PATH="$ANDROID_DIR/app/build/outputs/apk/release/app-release.apk"
 ls -lh "$APK_PATH"
 
 echo "=== [2/2] Installing APK onto connected Android tablet ==="

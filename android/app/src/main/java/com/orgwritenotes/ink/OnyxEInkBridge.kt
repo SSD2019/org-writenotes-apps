@@ -2,21 +2,24 @@ package com.orgwritenotes.ink
 
 import android.graphics.Rect
 import android.os.Build
-import android.view.MotionEvent
+import android.os.Handler
+import android.os.Looper
 import android.view.View
-import java.lang.reflect.InvocationHandler
+import com.onyx.android.sdk.api.device.epd.EpdController
+import com.onyx.android.sdk.data.note.TouchPoint
+import com.onyx.android.sdk.pen.RawInputCallback
+import com.onyx.android.sdk.pen.TouchHelper
+import com.onyx.android.sdk.pen.data.TouchPointList
 import java.lang.reflect.Method
-import java.lang.reflect.Proxy
 
 /**
  * Hardware detection, EPD waveform refresh control, and direct-to-screen raw stylus drawing
  * for Onyx Boox E-Ink devices (Tier 1, Tier 2, Tier 3).
  *
- * Uses cached reflection against Onyx's system/SDK classes (`com.onyx.android.sdk.api.device.epd.EpdController`
- * and `com.onyx.android.sdk.pen.TouchHelper` / `RawInputCallback`) so:
- *  1. Zero proprietary Maven dependencies or APK bloat are required.
- *  2. On regular LCD/OLED tablets (`isEInkDevice == false`), every method is an inline no-op
- *     with zero runtime overhead, zero allocations, and 100% original 60/120Hz behavior.
+ * The Onyx SDK is bundled in the APK. The EPD waveform controls use cached reflection and the
+ * raw stylus path calls `TouchHelper` directly, but both are only reached when
+ * `isEInkDevice == true`. On regular LCD/OLED tablets every method is an early-return no-op, so
+ * the Onyx classes are never loaded and the original 60/120Hz behavior is unchanged.
  */
 object OnyxEInkBridge {
 
@@ -30,18 +33,9 @@ object OnyxEInkBridge {
         val brand = Build.BRAND?.lowercase().orEmpty()
         val device = Build.DEVICE?.lowercase().orEmpty()
         val product = Build.PRODUCT?.lowercase().orEmpty()
-        if (mfr.contains("onyx") || brand.contains("onyx") || brand.contains("boox") ||
+        // Hardware-only check: the Onyx SDK is bundled in the APK, so class presence says nothing.
+        return mfr.contains("onyx") || brand.contains("onyx") || brand.contains("boox") ||
             device.contains("onyx") || product.contains("onyx") || product.contains("boox")
-        ) {
-            return true
-        }
-        // Fallback check if Onyx EPD framework class is present in the boot/system classpath
-        return try {
-            Class.forName("com.onyx.android.sdk.api.device.epd.EpdController")
-            true
-        } catch (_: Throwable) {
-            false
-        }
     }
 
     // =========================================================================
@@ -169,42 +163,39 @@ object OnyxEInkBridge {
     }
 
     /**
-     * Wraps an Onyx `TouchHelper` instance for a specific [WriteCanvasBlockView].
-     * If the Onyx Pen SDK classes are present on the device/runtime, this binds the hardware
-     * direct-to-EPD ink trace (~15ms latency) while forwarding every touch point to [RawStrokeListener]
-     * so the C++ Stylus Labs Write vector engine records the exact `.svgz` stroke.
+     * Wraps an Onyx `TouchHelper` for a specific [WriteCanvasBlockView]. The hardware renders the
+     * ink trace directly to the EPD (~15ms latency) while every touch point is forwarded to
+     * [RawStrokeListener] so the C++ Stylus Labs Write vector engine records the exact stroke.
+     *
+     * Only ever constructed when [isEInkDevice] is true, so the Onyx classes are never loaded
+     * on other devices.
      */
     class OnyxRawTouchSession private constructor(
-        private val touchHelperInstance: Any,
-        private val setLimitRectMethod: Method?,
-        private val setStrokeWidthMethod: Method?,
-        private val setStrokeStyleMethod: Method?,
-        private val setStrokeColorMethod: Method?,
-        private val openRawDrawingMethod: Method?,
-        private val closeRawDrawingMethod: Method?,
-        private val setRawDrawingEnabledMethod: Method?,
-        private val setRawDrawingRenderEnabledMethod: Method?,
-        private val stylePencilOrBrush: Int
+        private val touchHelper: TouchHelper
     ) : AutoCloseable {
         var isRawDrawingActive: Boolean = false
             private set
 
         fun updateLimitRect(view: View, excludeRects: List<Rect> = emptyList()) {
             try {
+                // The SDK reports points in the host view's local coordinates, so the limit region
+                // must be the view's local visible rect, not its on-screen (global) rect.
                 val rect = Rect()
-                view.getGlobalVisibleRect(rect)
-                if (!rect.isEmpty) {
-                    setLimitRectMethod?.invoke(touchHelperInstance, rect, ArrayList(excludeRects))
-                }
+                if (!view.getLocalVisibleRect(rect) || rect.isEmpty) return
+                // Limit changes only take effect when raw drawing is (re)armed.
+                val wasActive = isRawDrawingActive
+                if (wasActive) touchHelper.setRawDrawingEnabled(false)
+                touchHelper.setLimitRect(rect, ArrayList(excludeRects))
+                if (wasActive) touchHelper.setRawDrawingEnabled(true)
             } catch (_: Throwable) {
             }
         }
 
         fun configureStroke(widthPx: Float, colorArgb: Int) {
             try {
-                setStrokeStyleMethod?.invoke(touchHelperInstance, stylePencilOrBrush)
-                setStrokeWidthMethod?.invoke(touchHelperInstance, widthPx.coerceAtLeast(1.0f))
-                setStrokeColorMethod?.invoke(touchHelperInstance, colorArgb)
+                touchHelper.setStrokeStyle(TouchHelper.STROKE_STYLE_FOUNTAIN)
+                touchHelper.setStrokeWidth(widthPx.coerceAtLeast(1.0f))
+                touchHelper.setStrokeColor(colorArgb)
             } catch (_: Throwable) {
             }
         }
@@ -212,12 +203,12 @@ object OnyxEInkBridge {
         fun setRawDrawingEnabled(enabled: Boolean, renderToEpd: Boolean = true) {
             try {
                 if (enabled && !isRawDrawingActive) {
-                    openRawDrawingMethod?.invoke(touchHelperInstance)
-                    setRawDrawingEnabledMethod?.invoke(touchHelperInstance, true)
-                    setRawDrawingRenderEnabledMethod?.invoke(touchHelperInstance, renderToEpd)
+                    touchHelper.openRawDrawing()
+                    touchHelper.setRawDrawingEnabled(true)
+                    touchHelper.setRawDrawingRenderEnabled(renderToEpd)
                     isRawDrawingActive = true
                 } else if (!enabled && isRawDrawingActive) {
-                    setRawDrawingEnabledMethod?.invoke(touchHelperInstance, false)
+                    touchHelper.setRawDrawingEnabled(false)
                     isRawDrawingActive = false
                 }
             } catch (_: Throwable) {
@@ -226,8 +217,8 @@ object OnyxEInkBridge {
 
         fun release() {
             try {
-                setRawDrawingEnabledMethod?.invoke(touchHelperInstance, false)
-                closeRawDrawingMethod?.invoke(touchHelperInstance)
+                touchHelper.setRawDrawingEnabled(false)
+                touchHelper.closeRawDrawing()
                 isRawDrawingActive = false
             } catch (_: Throwable) {
             }
@@ -239,154 +230,63 @@ object OnyxEInkBridge {
             fun createIfSupported(view: View, listener: RawStrokeListener): OnyxRawTouchSession? {
                 if (!isEInkDevice) return null
                 return try {
-                    val touchHelperCls = Class.forName("com.onyx.android.sdk.pen.TouchHelper")
-                    val callbackCls = Class.forName("com.onyx.android.sdk.pen.RawInputCallback")
-
-                    val proxy = Proxy.newProxyInstance(
-                        callbackCls.classLoader,
-                        arrayOf(callbackCls),
-                        RawInputInvocationHandler(listener)
-                    )
-
-                    val createMethod = touchHelperCls.getMethod("create", View::class.java, callbackCls)
-                    val helperObj = createMethod.invoke(null, view, proxy) ?: return null
-
-                    val setLimitRect = runCatching {
-                        touchHelperCls.getMethod("setLimitRect", Rect::class.java, java.util.List::class.java)
-                    }.getOrNull()
-                    val setStrokeWidth = runCatching {
-                        touchHelperCls.getMethod("setStrokeWidth", Float::class.javaPrimitiveType)
-                    }.getOrNull()
-                    val setStrokeStyle = runCatching {
-                        touchHelperCls.getMethod("setStrokeStyle", Int::class.javaPrimitiveType)
-                    }.getOrNull()
-                    val setStrokeColor = runCatching {
-                        touchHelperCls.getMethod("setStrokeColor", Int::class.javaPrimitiveType)
-                    }.getOrNull()
-                    val openRaw = runCatching {
-                        touchHelperCls.getMethod("openRawDrawing")
-                    }.getOrNull()
-                    val closeRaw = runCatching {
-                        touchHelperCls.getMethod("closeRawDrawing")
-                    }.getOrNull()
-                    val setEnabled = runCatching {
-                        touchHelperCls.getMethod("setRawDrawingEnabled", Boolean::class.javaPrimitiveType)
-                    }.getOrNull()
-                    val setRenderEnabled = runCatching {
-                        touchHelperCls.getMethod("setRawDrawingRenderEnabled", Boolean::class.javaPrimitiveType)
-                    }.getOrNull()
-
-                    val brushConst = runCatching {
-                        touchHelperCls.getField("STROKE_STYLE_FOUNTAIN").getInt(null)
-                    }.getOrDefault(0)
-
-                    OnyxRawTouchSession(
-                        touchHelperInstance = helperObj,
-                        setLimitRectMethod = setLimitRect,
-                        setStrokeWidthMethod = setStrokeWidth,
-                        setStrokeStyleMethod = setStrokeStyle,
-                        setStrokeColorMethod = setStrokeColor,
-                        openRawDrawingMethod = openRaw,
-                        closeRawDrawingMethod = closeRaw,
-                        setRawDrawingEnabledMethod = setEnabled,
-                        setRawDrawingRenderEnabledMethod = setRenderEnabled,
-                        stylePencilOrBrush = brushConst
-                    )
-                } catch (_: Throwable) {
+                    // Onyx's pen SDK calls hidden framework APIs; exempt them before first use.
+                    runCatching { org.lsposed.hiddenapibypass.HiddenApiBypass.addHiddenApiExemptions("") }
+                    OnyxRawTouchSession(TouchHelper.create(view, RawCallback(listener)))
+                } catch (t: Throwable) {
+                    android.util.Log.w("OnyxEInkBridge", "Raw stylus session unavailable", t)
                     null
                 }
             }
         }
     }
 
-    private class RawInputInvocationHandler(
-        private val listener: RawStrokeListener
-    ) : InvocationHandler {
-        private var xField: java.lang.reflect.Field? = null
-        private var yField: java.lang.reflect.Field? = null
-        private var pressureField: java.lang.reflect.Field? = null
-        private var tiltXField: java.lang.reflect.Field? = null
-        private var tiltYField: java.lang.reflect.Field? = null
-        private var timestampField: java.lang.reflect.Field? = null
-        private var getPointsMethod: Method? = null
-        private var fieldsResolved = false
+    private class RawCallback(private val listener: RawStrokeListener) : RawInputCallback() {
+        // Onyx reports pressure in 0..getMaxTouchPressure(); the stroke engine expects 0..1.
+        private val maxPressure: Float =
+            runCatching { EpdController.getMaxTouchPressure() }.getOrDefault(0f)
+                .let { if (it > 0f) it else 4096f }
 
-        private fun resolveTouchPointFields(pointObj: Any) {
-            if (fieldsResolved) return
-            fieldsResolved = true
-            val cls = pointObj.javaClass
-            xField = runCatching { cls.getField("x").apply { isAccessible = true } }.getOrNull()
-            yField = runCatching { cls.getField("y").apply { isAccessible = true } }.getOrNull()
-            pressureField = runCatching { cls.getField("pressure").apply { isAccessible = true } }.getOrNull()
-            tiltXField = runCatching { cls.getField("tiltX").apply { isAccessible = true } }.getOrNull()
-            tiltYField = runCatching { cls.getField("tiltY").apply { isAccessible = true } }.getOrNull()
-            timestampField = runCatching { cls.getField("timestamp").apply { isAccessible = true } }.getOrNull()
+        // The SDK delivers callbacks on its own thread; the listener touches views and Compose
+        // state, so hop to the main looper (FIFO keeps stroke order).
+        private val main = Handler(Looper.getMainLooper())
+
+        private fun TouchPoint.pressure01() = (pressure / maxPressure).coerceIn(0f, 1f)
+
+        override fun onBeginRawDrawing(shortcutDrawing: Boolean, point: TouchPoint) {
+            val x = point.x; val y = point.y; val p = point.pressure01()
+            val tx = point.tiltX.toFloat(); val ty = point.tiltY.toFloat(); val t = point.timestamp
+            main.post { listener.onRawStrokeBegin(x, y, p, tx, ty, t) }
         }
 
-        private fun extractPoint(pointObj: Any, out5: FloatArray): Long {
-            resolveTouchPointFields(pointObj)
-            out5[0] = runCatching { xField?.getFloat(pointObj) ?: 0f }.getOrDefault(0f)
-            out5[1] = runCatching { yField?.getFloat(pointObj) ?: 0f }.getOrDefault(0f)
-            out5[2] = runCatching { pressureField?.getFloat(pointObj) ?: 0.5f }.getOrDefault(0.5f)
-            out5[3] = runCatching { tiltXField?.getFloat(pointObj) ?: 0f }.getOrDefault(0f)
-            out5[4] = runCatching { tiltYField?.getFloat(pointObj) ?: 0f }.getOrDefault(0f)
-            return runCatching { timestampField?.getLong(pointObj) ?: System.currentTimeMillis() }
-                .getOrDefault(System.currentTimeMillis())
+        override fun onRawDrawingTouchPointMoveReceived(point: TouchPoint) {
+            val x = point.x; val y = point.y; val p = point.pressure01()
+            val tx = point.tiltX.toFloat(); val ty = point.tiltY.toFloat(); val t = point.timestamp
+            main.post { listener.onRawStrokeMove(x, y, p, tx, ty, t) }
         }
 
-        private val tmpPt = FloatArray(5)
+        override fun onRawDrawingTouchPointListReceived(pointList: TouchPointList) {
+            // Per-point moves are already delivered above; the list is the whole stroke on pen-up.
+        }
 
-        override fun invoke(proxy: Any, method: Method, args: Array<out Any?>?): Any? {
-            when (method.name) {
-                "onBeginRawDrawing" -> {
-                    val pt = args?.getOrNull(1) ?: return null
-                    val ts = extractPoint(pt, tmpPt)
-                    listener.onRawStrokeBegin(tmpPt[0], tmpPt[1], tmpPt[2], tmpPt[3], tmpPt[4], ts)
-                }
-                "onRawDrawingTouchPointMoveReceived" -> {
-                    val pt = args?.getOrNull(0) ?: return null
-                    val ts = extractPoint(pt, tmpPt)
-                    listener.onRawStrokeMove(tmpPt[0], tmpPt[1], tmpPt[2], tmpPt[3], tmpPt[4], ts)
-                }
-                "onRawDrawingTouchPointListReceived" -> {
-                    val listObj = args?.getOrNull(0) ?: return null
-                    val points: Iterable<*>? = when (listObj) {
-                        is Iterable<*> -> listObj
-                        else -> {
-                            if (getPointsMethod == null) {
-                                getPointsMethod = runCatching { listObj.javaClass.getMethod("getPoints") }.getOrNull()
-                            }
-                            runCatching { getPointsMethod?.invoke(listObj) as? Iterable<*> }.getOrNull()
-                        }
-                    }
-                    points?.forEach { pt ->
-                        if (pt != null) {
-                            val ts = extractPoint(pt, tmpPt)
-                            listener.onRawStrokeMove(tmpPt[0], tmpPt[1], tmpPt[2], tmpPt[3], tmpPt[4], ts)
-                        }
-                    }
-                }
-                "onEndRawDrawing" -> {
-                    listener.onRawStrokeEnd()
-                }
-                "onBeginRawErasing" -> {
-                    val pt = args?.getOrNull(1) ?: return null
-                    val ts = extractPoint(pt, tmpPt)
-                    listener.onRawEraseBegin(tmpPt[0], tmpPt[1], ts)
-                }
-                "onRawErasingTouchPointMoveReceived" -> {
-                    val pt = args?.getOrNull(0) ?: return null
-                    val ts = extractPoint(pt, tmpPt)
-                    listener.onRawEraseMove(tmpPt[0], tmpPt[1], ts)
-                }
-                "onEndRawErasing" -> {
-                    listener.onRawEraseEnd()
-                }
-                "hashCode" -> return System.identityHashCode(proxy)
-                "equals" -> return proxy === args?.getOrNull(0)
-                "toString" -> return "OnyxRawInputProxy"
-            }
-            return null
+        override fun onEndRawDrawing(outLimitRegion: Boolean, point: TouchPoint) {
+            main.post { listener.onRawStrokeEnd() }
+        }
+
+        override fun onBeginRawErasing(shortcutErasing: Boolean, point: TouchPoint) {
+            val x = point.x; val y = point.y; val t = point.timestamp
+            main.post { listener.onRawEraseBegin(x, y, t) }
+        }
+
+        override fun onRawErasingTouchPointMoveReceived(point: TouchPoint) {
+            val x = point.x; val y = point.y; val t = point.timestamp
+            main.post { listener.onRawEraseMove(x, y, t) }
+        }
+
+        override fun onRawErasingTouchPointListReceived(pointList: TouchPointList) {}
+
+        override fun onEndRawErasing(outLimitRegion: Boolean, point: TouchPoint) {
+            main.post { listener.onRawEraseEnd() }
         }
     }
 }

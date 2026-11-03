@@ -15,12 +15,24 @@ android {
         versionCode = 1
         versionName = "0.1.0"
 
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
+
         externalNativeBuild {
             cmake {
                 cFlags += "-O3 -DNDEBUG -ffast-math -fno-math-errno"
                 cppFlags += "-std=c++17 -O3 -DNDEBUG -ffast-math -fno-math-errno"
                 abiFilters += listOf("arm64-v8a")
             }
+        }
+    }
+
+    buildTypes {
+        release {
+            // Signed with the debug key so it installs over debug builds; swap for a real keystore to ship.
+            signingConfig = signingConfigs.getByName("debug")
+            isMinifyEnabled = false
         }
     }
 
@@ -44,6 +56,11 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    packaging {
+        // Onyx SDK and mmkv each bundle libc++_shared.so
+        jniLibs.pickFirsts += "**/libc++_shared.so"
+    }
+
     kotlinOptions {
         jvmTarget = "17"
     }
@@ -58,6 +75,10 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
+    // Onyx Boox pen/EPD SDK; only touched via reflection when OnyxEInkBridge.isEInkDevice is true.
+    implementation("com.onyx.android.sdk:onyxsdk-device:1.2.30")
+    implementation("com.onyx.android.sdk:onyxsdk-pen:1.4.11")
+    implementation("org.lsposed.hiddenapibypass:hiddenapibypass:4.3")
     testImplementation("junit:junit:4.13.2")
 }
 
