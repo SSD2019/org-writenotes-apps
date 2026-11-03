@@ -382,6 +382,28 @@ class WriteCanvasBlockView(
     // Tier 3: Optional Onyx Boox direct-to-EPD TouchHelper session (null on non-Onyx or when unsupported)
     private var onyxRawSession: OnyxEInkBridge.OnyxRawTouchSession? = null
     private var isOnyxRawStrokeInProgress: Boolean = false
+    private var isOnyxRawEraseInProgress: Boolean = false
+    // Tool/state changes arriving mid-stroke must not toggle the pen layer until the SDK reports the end.
+    private var onyxSyncDeferred: Boolean = false
+    private val onyxDeferredSyncTimeout = Runnable {
+        if (onyxSyncDeferred) {
+            // The SDK never reported the end of the gesture; close it ourselves so input is not ignored.
+            if (isOnyxRawStrokeInProgress) {
+                isOnyxRawStrokeInProgress = false
+                finalizeActiveNativeStroke()
+            }
+            isOnyxRawEraseInProgress = false
+            applyDeferredOnyxSync()
+        }
+    }
+
+    private fun applyDeferredOnyxSync() {
+        removeCallbacks(onyxDeferredSyncTimeout)
+        if (onyxSyncDeferred) {
+            onyxSyncDeferred = false
+            syncOnyxRawDrawingState()
+        }
+    }
 
     private val onyxRawStrokeListener = object : OnyxEInkBridge.RawStrokeListener {
         override fun onRawStrokeBegin(
@@ -440,9 +462,12 @@ class WriteCanvasBlockView(
             isOnyxRawStrokeInProgress = false
             finalizeActiveNativeStroke()
             OnyxEInkBridge.requestCleanRefresh(this@WriteCanvasBlockView)
+            applyDeferredOnyxSync()
         }
 
         override fun onRawEraseBegin(screenX: Float, screenY: Float, timestampMs: Long) {
+            isOnyxRawEraseInProgress = true
+            OnyxEInkBridge.enterFastPanMode(this@WriteCanvasBlockView)
             onCanvasActivated?.invoke()
             val cx = screenToCanvasX(screenX)
             val cy = screenToCanvasY(screenY)
@@ -495,6 +520,8 @@ class WriteCanvasBlockView(
         }
 
         override fun onRawEraseEnd() {
+            isOnyxRawEraseInProgress = false
+            OnyxEInkBridge.exitFastPanModeAndRefresh(this@WriteCanvasBlockView)
             activeEraserCursor = null
             freeEraseLastX = 0f
             freeEraseLastY = 0f
@@ -505,11 +532,18 @@ class WriteCanvasBlockView(
                 OnyxEInkBridge.requestCleanRefresh(this@WriteCanvasBlockView)
                 onStrokeCommitted("<erase/>", canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
             }
+            applyDeferredOnyxSync()
         }
     }
 
     private fun syncOnyxRawDrawingState() {
         val session = onyxRawSession ?: return
+        if (isOnyxRawStrokeInProgress || isOnyxRawEraseInProgress) {
+            onyxSyncDeferred = true
+            removeCallbacks(onyxDeferredSyncTimeout)
+            postDelayed(onyxDeferredSyncTimeout, 2000L)
+            return
+        }
         val shouldUseRawDrawing = (toolMode == StylusToolMode.PEN || toolMode == StylusToolMode.HIGHLIGHTER) &&
             !selectionState.hasSelection &&
             !lineDrawing
@@ -1105,6 +1139,25 @@ class WriteCanvasBlockView(
         invalidate()
     }
 
+    // On E-Ink every invalidate() becomes a panel refresh; during erase/pan, bursts of them starve
+    // the frame pipeline (and with it, input). Coalesce to ~12 per second there.
+    private var invalidateThrottlePending = false
+    private val throttledInvalidateRunnable = Runnable {
+        invalidateThrottlePending = false
+        invalidate()
+    }
+
+    private fun invalidateThrottled() {
+        if (!OnyxEInkBridge.isEInkDevice) {
+            invalidate()
+            return
+        }
+        if (!invalidateThrottlePending) {
+            invalidateThrottlePending = true
+            postDelayed(throttledInvalidateRunnable, 80L)
+        }
+    }
+
     private fun refreshDirtyRect(
         left: Float,
         top: Float,
@@ -1129,7 +1182,7 @@ class WriteCanvasBlockView(
         if (notifyState) {
             notifyViewportUpdated()
         }
-        invalidate()
+        invalidateThrottled()
     }
 
     fun queryPageSetupState(): WritePageSetupState {
@@ -1983,9 +2036,35 @@ class WriteCanvasBlockView(
         syncOnyxRawDrawingState()
     }
 
+    // While the stylus eraser button is held, the Onyx pen layer must be off: armed, it makes the panel hold
+    // back the app's own redraws (erased strokes would only appear after a later refresh).
+    private var onyxDisarmedForEraserButton = false
+
+    private fun disarmOnyxForEraserButton() {
+        val session = onyxRawSession ?: return
+        if (!onyxDisarmedForEraserButton && session.isRawDrawingActive &&
+            !isOnyxRawStrokeInProgress && !isOnyxRawEraseInProgress
+        ) {
+            session.setRawDrawingEnabled(false)
+            onyxDisarmedForEraserButton = true
+        }
+    }
+
+    private fun rearmOnyxAfterEraserButton() {
+        if (onyxDisarmedForEraserButton) {
+            onyxDisarmedForEraserButton = false
+            syncOnyxRawDrawingState()
+        }
+    }
+
     override fun onHoverEvent(event: MotionEvent): Boolean {
         if (event.pointerCount > 0 && event.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS) {
             lastStylusActivityMs = event.eventTime
+        }
+        if (OnyxEInkBridge.isEInkDevice) {
+            val buttons = event.buttonState and
+                (MotionEvent.BUTTON_STYLUS_PRIMARY or MotionEvent.BUTTON_STYLUS_SECONDARY)
+            if (buttons != 0) disarmOnyxForEraserButton() else rearmOnyxAfterEraserButton()
         }
         if (event.actionMasked == MotionEvent.ACTION_HOVER_ENTER) {
             onCanvasActivated?.invoke()
@@ -2156,7 +2235,9 @@ class WriteCanvasBlockView(
             toolType == MotionEvent.TOOL_TYPE_MOUSE ||
             isStylusButton
 
-        if (action == MotionEvent.ACTION_DOWN && isStylusOrMouse) {
+        // Unbuffered dispatch is a latency trick for LCD tablets. On Boox the Onyx pen layer already
+        // gives low latency, and the unbuffered path has been seen leaving stylus MOVE batches unfinished.
+        if (action == MotionEvent.ACTION_DOWN && isStylusOrMouse && !OnyxEInkBridge.isEInkDevice) {
             requestUnbufferedDispatch(event)
         }
 
@@ -2226,7 +2307,7 @@ class WriteCanvasBlockView(
                         panOffsetY += (touchY - panLastTouchY)
                         panLastTouchX = touchX
                         panLastTouchY = touchY
-                        invalidate()
+                        invalidateThrottled()
                     }
                     return true
                 }
@@ -2444,6 +2525,10 @@ class WriteCanvasBlockView(
 
             when (action) {
                 MotionEvent.ACTION_DOWN -> {
+                    if (isHardwareEraser) disarmOnyxForEraserButton()
+                    // Fast waveform for the whole erase gesture: full-quality refreshes queue up on E-Ink
+                    // and make the result appear seconds late.
+                    OnyxEInkBridge.enterFastPanMode(this)
                     freeEraseLastX = cx
                     freeEraseLastY = cy
                     activeEraserCursor = Triple(cx, cy, eraseRadius)
@@ -2538,7 +2623,7 @@ class WriteCanvasBlockView(
                             anyErasedInGesture = true
                             refreshDirtyRect(dLeft, dTop, dRight, dBottom, notifyState = false)
                         } else {
-                            invalidate()
+                            invalidateThrottled()
                         }
                     } else {
                         freeEraseLastX = cx
@@ -2552,6 +2637,8 @@ class WriteCanvasBlockView(
                     activeEraserCursor = null
                     freeEraseLastX = 0f
                     freeEraseLastY = 0f
+                    OnyxEInkBridge.exitFastPanModeAndRefresh(this)
+                    if (!isHardwareEraser) rearmOnyxAfterEraserButton()
                     invalidate()
                     if (anyErasedInGesture) {
                         anyErasedInGesture = false
@@ -3219,6 +3306,12 @@ class WriteCanvasBlockView(
     }
 
     override fun onDetachedFromWindow() {
+        removeCallbacks(throttledInvalidateRunnable)
+        invalidateThrottlePending = false
+        onyxDisarmedForEraserButton = false
+        removeCallbacks(onyxDeferredSyncTimeout)
+        onyxSyncDeferred = false
+        isOnyxRawEraseInProgress = false
         isOnyxRawStrokeInProgress = false
         onyxRawSession?.close()
         onyxRawSession = null

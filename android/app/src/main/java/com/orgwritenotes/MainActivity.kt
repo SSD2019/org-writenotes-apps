@@ -22,6 +22,7 @@ import com.orgwritenotes.ui.OrgWriteNotesTabletScreen
 
 class MainActivity : ComponentActivity() {
     private lateinit var syncClient: EmacsSyncClient
+    private val choreographerWatchdog = com.orgwritenotes.ink.ChoreographerWatchdog()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -94,11 +95,13 @@ class MainActivity : ComponentActivity() {
     // D5: pause reconnect retries while backgrounded; reconnect immediately on resume.
     override fun onResume() {
         super.onResume()
+        if (OnyxEInkBridge.isEInkDevice) choreographerWatchdog.start(window.decorView)
         syncClient.onAppResumed()
     }
 
     // D2: flush debounced sketch commits as early as ON_PAUSE.
     override fun onPause() {
+        choreographerWatchdog.stop()
         syncClient.flushAllPendingCommits()
         super.onPause()
     }
