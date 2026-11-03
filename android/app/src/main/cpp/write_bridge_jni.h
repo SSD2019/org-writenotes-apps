@@ -7,6 +7,7 @@
 #include <vector>
 #include <memory>
 #include <mutex>
+#include <atomic>
 
 // Forward declarations from Stylus Labs Write (syncscribble / usvg / ulib)
 class Document;
@@ -24,7 +25,8 @@ enum TemplateRulingStyle : int {
     RULING_ISOMETRIC       = 3, // Isometric 30/60 deg triangle grid
     RULING_MUSIC_STAFF     = 4, // 5-line musical staves
     RULING_CORNELL_SUMMARY = 5, // Cornell Notes (Header bar + Left cue column + Bottom summary box)
-    RULING_CUSTOM_DESIGNER = 6  // User-designed locked template or custom background image
+    RULING_CUSTOM_DESIGNER = 6, // User-designed locked template or custom background image
+    RULING_WEEKLY_PLANNER  = 7  // Weekly planner: header bar + 7 day rows with a label column
 };
 
 /**
@@ -36,10 +38,24 @@ public:
     NativeCanvasSession(int width, int height, int xRuling, int yRuling);
     ~NativeCanvasSession();
 
+    void retain();
+    void release();
+
     bool loadSvgzBytes(const uint8_t* bytes, size_t length);
     std::vector<uint8_t> exportSvgzBytes();
 
-    bool renderToPixels(uint8_t* dstPixels, int bmpWidth, int bmpHeight);
+    // Renders the page into dstPixels. (originX, originY) is the page coordinate shown at the bitmap's
+    // top-left corner, which lets callers render only a tile of a very large page (D4).
+    bool renderToPixels(uint8_t* dstPixels, int bmpWidth, int bmpHeight, float originX = 0.0f, float originY = 0.0f);
+    bool renderDirtyRectToPixels(
+        uint8_t* dstPixels,
+        int bmpWidth,
+        int bmpHeight,
+        float left,
+        float top,
+        float right,
+        float bottom
+    );
 
     void setPen(
         int colorArgb,
@@ -52,14 +68,19 @@ public:
     );
     void beginStroke(float x, float y, float pressure, float tiltX, float tiltY, double timestampMs);
     void moveStroke(float x, float y, float pressure, float tiltX, float tiltY, double timestampMs);
-    std::string endStroke(bool* outHeightExpanded, int* outNewHeight);
+    void moveStrokeBatch(const float* pointsData6, int pointCount);
+    int snapActiveStrokeToShape(float* outSnappedPoints, int maxFloats, int* outNumPoints);
+    std::string endStroke(bool* outHeightExpanded, int* outNewHeight, float* outDirtyBounds4 = nullptr);
 
     // Erasers: Stroke Eraser, Ruled Line Eraser, and Free (Segment/Image) Eraser
-    bool eraseAt(float x, float y, float radius);
-    bool eraseRuledLineAt(float y);
-    bool eraseFreeSegment(float prevX, float prevY, float x, float y, float radius);
+    bool eraseAt(float x, float y, float radius, float* outDirtyBounds4 = nullptr);
+    bool eraseSegment(float prevX, float prevY, float x, float y, float radius, float* outDirtyBounds4 = nullptr);
+    bool eraseRuledLineAt(float y, float* outDirtyBounds4 = nullptr);
+    bool eraseFreeSegment(float prevX, float prevY, float x, float y, float radius, float* outDirtyBounds4 = nullptr);
 
     bool resizeCanvas(int newWidth, int newHeight);
+    bool trimBottomWhitespace(int paddingPx, int* outNewHeight);
+    bool setTemplateImageOpacity(float opacity);
 
     // Selection operations (Rect, Lasso, Ruled, Select All)
     int selectRect(float left, float top, float right, float bottom, float* outBounds4);
@@ -67,8 +88,14 @@ public:
     int selectRuled(float startY, float endY, float* outBounds4);
     int selectAll(float* outBounds4);
     void clearSelection();
-    bool hasSelection() const { return !m_selectedElements.empty(); }
-    int selectionCount() const { return static_cast<int>(m_selectedElements.size()); }
+    bool hasSelection() const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        return !m_selectedElements.empty();
+    }
+    int selectionCount() const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        return static_cast<int>(m_selectedElements.size());
+    }
     bool getSelectionBounds(float* outBounds4) const;
 
     // Selection transforms & clipboard
@@ -92,7 +119,13 @@ public:
         int* outNewHeight
     );
     bool deleteSelection();
-    int duplicateSelection(float offsetX, float offsetY, float* outBounds4);
+    int duplicateSelection(
+        float offsetX,
+        float offsetY,
+        float* outBounds4,
+        int* outNewWidth = nullptr,
+        int* outNewHeight = nullptr
+    );
     bool restyleSelection(int colorArgb, float strokeWidth);
     std::string copySelectionSvg() const;
     int pasteSelectionSvg(
@@ -142,7 +175,10 @@ public:
     int ruleColorArgb() const;
     int marginLeft() const;
     int strokeCount() const;
-    int rulingStyle() const { return m_rulingStyle; }
+    int rulingStyle() const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        return m_rulingStyle;
+    }
     bool hasCustomTemplateNodes() const;
 
     bool undo();
@@ -150,10 +186,24 @@ public:
     bool canUndo() const;
     bool canRedo() const;
 
-    int width() const { return m_width; }
-    int height() const { return m_height; }
-    int xRuling() const { return m_xRuling; }
-    int yRuling() const { return m_yRuling; }
+    void setRenderTheme(bool isDark, uint32_t darkBgArgb, uint32_t darkFgArgb);
+
+    int width() const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        return m_width;
+    }
+    int height() const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        return m_height;
+    }
+    int xRuling() const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        return m_xRuling;
+    }
+    int yRuling() const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        return m_yRuling;
+    }
 
 private:
     void sanitizeSelection();
@@ -168,6 +218,9 @@ private:
     int m_xRuling;
     int m_yRuling;
     int m_rulingStyle = RULING_STANDARD;
+    bool m_renderDarkTheme = false;
+    uint32_t m_darkBgArgb = 0xFF181825;
+    uint32_t m_darkFgArgb = 0xFFCDD6F4;
     uint32_t m_penColor = 0xFF1E293B;
     float m_penWidth = 2.6f;
     bool m_pressureSensitive = true;
@@ -181,8 +234,12 @@ private:
     Page* m_page = nullptr; // owned by m_doc
     std::vector<Element*> m_selectedElements;
     std::unique_ptr<StrokeBuilder> m_activeStroke;
+    struct InputPt { float x; float y; double ts; };
+    std::vector<InputPt> m_activeInputPoints;
+    bool m_activeStrokeSnapped = false;
     std::unique_ptr<Painter> m_swPainter;
     mutable std::recursive_mutex m_mutex;
+    std::atomic<int> m_refCount{1};
 };
 
 } // namespace orgwritenotes

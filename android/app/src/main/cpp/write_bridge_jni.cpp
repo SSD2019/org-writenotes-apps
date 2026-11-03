@@ -76,6 +76,7 @@ static const char* rulingStyleToName(int style) {
         case RULING_ISOMETRIC:       return "isometric";
         case RULING_MUSIC_STAFF:     return "music";
         case RULING_CORNELL_SUMMARY: return "cornell";
+        case RULING_WEEKLY_PLANNER:  return "weekly";
         case RULING_CUSTOM_DESIGNER: return "custom";
         default:                     return "standard";
     }
@@ -88,6 +89,7 @@ static int parseRulingStyleName(const char* name) {
     if (std::strcmp(name, "isometric") == 0) return RULING_ISOMETRIC;
     if (std::strcmp(name, "music") == 0) return RULING_MUSIC_STAFF;
     if (std::strcmp(name, "cornell") == 0) return RULING_CORNELL_SUMMARY;
+    if (std::strcmp(name, "weekly") == 0) return RULING_WEEKLY_PLANNER;
     if (std::strcmp(name, "custom") == 0) return RULING_CUSTOM_DESIGNER;
     return RULING_STANDARD;
 }
@@ -116,6 +118,16 @@ NativeCanvasSession::NativeCanvasSession(int width, int height, int xRuling, int
 }
 
 NativeCanvasSession::~NativeCanvasSession() = default;
+
+void NativeCanvasSession::retain() {
+    m_refCount.fetch_add(1, std::memory_order_relaxed);
+}
+
+void NativeCanvasSession::release() {
+    if (m_refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        delete this;
+    }
+}
 
 void NativeCanvasSession::detectRulingStyleFromLoadedPage() {
     if (!m_page || !m_page->contentNode) {
@@ -191,54 +203,91 @@ void NativeCanvasSession::rebuildProceduralRuleLayer() {
     newRuleNode->addChild(bgRect);
 
     if (m_rulingStyle == RULING_DOTTED) {
-        // Dot Grid: crisp circular/diamond dots at each (xStep, yStep) intersection
-        Path2D dotsPath;
+        // Dot Grid: crisp circular/diamond dots partitioned into vertical bands for fast dirty-rect culling
         const Dim r = 1.6f;
-        for (Dim y = yStep; y < h; y += yStep) {
-            for (Dim x = xStep; x < w; x += xStep) {
-                dotsPath.moveTo(Point(x - r, y));
-                dotsPath.lineTo(Point(x + r, y));
-                dotsPath.moveTo(Point(x, y - r));
-                dotsPath.lineTo(Point(x, y + r));
+        const Dim bandHeight = 512.0f;
+        for (Dim bandTop = 0; bandTop < h; bandTop += bandHeight) {
+            const Dim bandBottom = std::min(h, bandTop + bandHeight);
+            Path2D dotsPath;
+            Dim firstY = std::max(yStep, std::ceil(bandTop / yStep) * yStep);
+            if (firstY < bandTop && firstY > 0) firstY += yStep;
+            for (Dim y = firstY; y < bandBottom; y += yStep) {
+                for (Dim x = xStep; x < w; x += xStep) {
+                    dotsPath.moveTo(Point(x - r, y));
+                    dotsPath.lineTo(Point(x + r, y));
+                    dotsPath.moveTo(Point(x, y - r));
+                    dotsPath.lineTo(Point(x, y + r));
+                }
+            }
+            if (!dotsPath.empty()) {
+                auto* dotNode = new SvgPath(dotsPath);
+                dotNode->setAttr<float>("stroke-width", 2.2f);
+                dotNode->setAttr<int>("stroke-linecap", Painter::RoundCap);
+                newRuleNode->addChild(dotNode);
             }
         }
-        auto* dotNode = new SvgPath(dotsPath);
-        dotNode->setAttr<float>("stroke-width", 2.2f);
-        dotNode->setAttr<int>("stroke-linecap", Painter::RoundCap);
-        newRuleNode->addChild(dotNode);
     } else if (m_rulingStyle == RULING_ENGINEER_GRID) {
-        // Engineering Graph Paper: subtle minor grid (1x) + bold major grid (5x)
-        Path2D minorPath;
-        Path2D majorPath;
-        int rowIdx = 1;
-        for (Dim y = yStep; y < h; y += yStep, ++rowIdx) {
-            if (rowIdx % 5 == 0) {
-                majorPath.addLine(Point(0, y), Point(w, y));
-            } else {
-                minorPath.addLine(Point(0, y), Point(w, y));
-            }
-        }
-        int colIdx = 1;
-        for (Dim x = xStep; x < w; x += xStep, ++colIdx) {
-            if (colIdx % 5 == 0) {
-                majorPath.addLine(Point(x, 0), Point(x, h));
-            } else {
-                minorPath.addLine(Point(x, 0), Point(x, h));
-            }
-        }
-        auto* minorNode = new SvgPath(minorPath);
+        // Engineering Graph Paper: subtle minor grid (1x) + bold major grid (5x), partitioned into bands
         Color minorColor = m_page->props.ruleColor;
         minorColor.setAlphaF(0.35f);
-        setSvgStrokeColor(minorNode, minorColor);
-        minorNode->setAttr<float>("stroke-width", 0.8f);
-        newRuleNode->addChild(minorNode);
-
-        auto* majorNode = new SvgPath(majorPath);
         Color majorColor = m_page->props.ruleColor;
         majorColor.setAlphaF(0.85f);
-        setSvgStrokeColor(majorNode, majorColor);
-        majorNode->setAttr<float>("stroke-width", 1.6f);
-        newRuleNode->addChild(majorNode);
+
+        const Dim bandHeight = 512.0f;
+        int rowIdx = 1;
+        Dim y = yStep;
+        while (y < h) {
+            const Dim bandLimit = y + bandHeight;
+            Path2D minorRows;
+            Path2D majorRows;
+            for (; y < h && y < bandLimit; y += yStep, ++rowIdx) {
+                if (rowIdx % 5 == 0) {
+                    majorRows.addLine(Point(0, y), Point(w, y));
+                } else {
+                    minorRows.addLine(Point(0, y), Point(w, y));
+                }
+            }
+            if (!minorRows.empty()) {
+                auto* minorNode = new SvgPath(minorRows);
+                setSvgStrokeColor(minorNode, minorColor);
+                minorNode->setAttr<float>("stroke-width", 0.8f);
+                newRuleNode->addChild(minorNode);
+            }
+            if (!majorRows.empty()) {
+                auto* majorNode = new SvgPath(majorRows);
+                setSvgStrokeColor(majorNode, majorColor);
+                majorNode->setAttr<float>("stroke-width", 1.6f);
+                newRuleNode->addChild(majorNode);
+            }
+        }
+
+        const Dim colBandWidth = 512.0f;
+        int colIdx = 1;
+        Dim x = xStep;
+        while (x < w) {
+            const Dim colLimit = x + colBandWidth;
+            Path2D minorCols;
+            Path2D majorCols;
+            for (; x < w && x < colLimit; x += xStep, ++colIdx) {
+                if (colIdx % 5 == 0) {
+                    majorCols.addLine(Point(x, 0), Point(x, h));
+                } else {
+                    minorCols.addLine(Point(x, 0), Point(x, h));
+                }
+            }
+            if (!minorCols.empty()) {
+                auto* minorNode = new SvgPath(minorCols);
+                setSvgStrokeColor(minorNode, minorColor);
+                minorNode->setAttr<float>("stroke-width", 0.8f);
+                newRuleNode->addChild(minorNode);
+            }
+            if (!majorCols.empty()) {
+                auto* majorNode = new SvgPath(majorCols);
+                setSvgStrokeColor(majorNode, majorColor);
+                majorNode->setAttr<float>("stroke-width", 1.6f);
+                newRuleNode->addChild(majorNode);
+            }
+        }
     } else if (m_rulingStyle == RULING_ISOMETRIC) {
         // Isometric 30° / 60° triangle grid
         Path2D isoPath;
@@ -266,13 +315,13 @@ void NativeCanvasSession::rebuildProceduralRuleLayer() {
         isoNode->setAttr<float>("stroke-width", 0.9f);
         newRuleNode->addChild(isoNode);
     } else if (m_rulingStyle == RULING_MUSIC_STAFF) {
-        // 5-line Music Staves with left/right bar borders
-        Path2D staffPath;
+        // 5-line Music Staves with left/right bar borders, one SvgPath per staff for fast culling
         const Dim lineGap = std::max<Dim>(10.0f, std::round(yStep * 0.3f));
         const Dim staffBlock = lineGap * 4.0f + std::max<Dim>(42.0f, yStep * 1.2f);
         const Dim leftPad = m_page->props.marginLeft > 0 ? m_page->props.marginLeft : 48.0f;
         const Dim rightPad = std::max<Dim>(leftPad + 100.0f, w - 48.0f);
         for (Dim baseY = 48.0f; baseY + lineGap * 4.0f < h - 24.0f; baseY += staffBlock) {
+            Path2D staffPath;
             for (int l = 0; l < 5; ++l) {
                 Dim ly = baseY + l * lineGap;
                 staffPath.addLine(Point(leftPad, ly), Point(rightPad, ly));
@@ -280,10 +329,10 @@ void NativeCanvasSession::rebuildProceduralRuleLayer() {
             // Left and right staff barlines
             staffPath.addLine(Point(leftPad, baseY), Point(leftPad, baseY + lineGap * 4.0f));
             staffPath.addLine(Point(rightPad, baseY), Point(rightPad, baseY + lineGap * 4.0f));
+            auto* staffNode = new SvgPath(staffPath);
+            staffNode->setAttr<float>("stroke-width", 1.2f);
+            newRuleNode->addChild(staffNode);
         }
-        auto* staffNode = new SvgPath(staffPath);
-        staffNode->setAttr<float>("stroke-width", 1.2f);
-        newRuleNode->addChild(staffNode);
     } else if (m_rulingStyle == RULING_CORNELL_SUMMARY) {
         // Cornell Note-Taking Template: Header bar, Left cue column, Ruled notes area, Bottom summary box
         const Dim headerY = std::max<Dim>(yStep * 2.0f, 72.0f);
@@ -305,9 +354,40 @@ void NativeCanvasSession::rebuildProceduralRuleLayer() {
         setSvgStrokeColor(frameNode, Color::fromArgb(0xFFE11D48)); // Classic Cornell red/rose divider lines
         frameNode->setAttr<float>("stroke-width", 1.8f);
         newRuleNode->addChild(frameNode);
+    } else if (m_rulingStyle == RULING_WEEKLY_PLANNER) {
+        // Weekly planner: header bar, label column, and 7 equal day rows with light ruled lines
+        const Dim headerY = std::max<Dim>(yStep * 1.5f, 60.0f);
+        const Dim labelX = m_page->props.marginLeft > 0 ? m_page->props.marginLeft : 150.0f;
+        const Dim rowH = (h - headerY) / 7.0f;
+
+        Path2D linesPath;
+        for (int day = 0; day < 7; ++day) {
+            const Dim top = headerY + day * rowH;
+            for (Dim y = top + yStep; y < top + rowH - 2.0f; y += yStep) {
+                linesPath.addLine(Point(labelX, y), Point(w, y));
+            }
+        }
+        auto* linesNode = new SvgPath(linesPath);
+        Color lineColor = m_page->props.ruleColor;
+        lineColor.setAlphaF(0.45f);
+        setSvgStrokeColor(linesNode, lineColor);
+        linesNode->setAttr<float>("stroke-width", 0.8f);
+        newRuleNode->addChild(linesNode);
+
+        Path2D framePath;
+        framePath.addLine(Point(0, headerY), Point(w, headerY));
+        for (int day = 1; day < 7; ++day) {
+            const Dim y = headerY + day * rowH;
+            framePath.addLine(Point(0, y), Point(w, y));
+        }
+        framePath.addLine(Point(labelX, headerY), Point(labelX, h));
+        auto* frameNode = new SvgPath(framePath);
+        setSvgStrokeColor(frameNode, m_page->props.ruleColor);
+        frameNode->setAttr<float>("stroke-width", 1.6f);
+        newRuleNode->addChild(frameNode);
     }
 
-    if (m_page->props.marginLeft > 0 && m_rulingStyle != RULING_CORNELL_SUMMARY && m_rulingStyle != RULING_MUSIC_STAFF) {
+    if (m_page->props.marginLeft > 0 && m_rulingStyle != RULING_CORNELL_SUMMARY && m_rulingStyle != RULING_MUSIC_STAFF && m_rulingStyle != RULING_WEEKLY_PLANNER) {
         auto* marginNode = new SvgPath(
             Path2D().addLine(Point(m_page->props.marginLeft, 0), Point(m_page->props.marginLeft, h))
         );
@@ -320,6 +400,7 @@ void NativeCanvasSession::rebuildProceduralRuleLayer() {
 }
 
 bool NativeCanvasSession::loadSvgzBytes(const uint8_t* bytes, size_t length) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!bytes || length == 0) return false;
     auto stream = std::make_unique<MemStream>(
         reinterpret_cast<const char*>(bytes),
@@ -351,6 +432,7 @@ bool NativeCanvasSession::loadSvgzBytes(const uint8_t* bytes, size_t length) {
 }
 
 std::vector<uint8_t> NativeCanvasSession::exportSvgzBytes() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_doc) return {};
     if (m_page && m_page->contentNode) {
         m_page->contentNode->setAttr("rulingstyle", rulingStyleToName(m_rulingStyle));
@@ -367,20 +449,408 @@ std::vector<uint8_t> NativeCanvasSession::exportSvgzBytes() {
     return std::vector<uint8_t>(rawPtr, rawPtr + outStream.size());
 }
 
-bool NativeCanvasSession::renderToPixels(uint8_t* dstPixels, int bmpWidth, int bmpHeight) {
+void NativeCanvasSession::setRenderTheme(bool isDark, uint32_t darkBgArgb, uint32_t darkFgArgb) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    m_renderDarkTheme = isDark;
+    if (darkBgArgb != 0) {
+        Color c = Color::fromArgb(darkBgArgb).opaque();
+        int luma = c.red() * 299 + c.green() * 587 + c.blue() * 114;
+        m_darkBgArgb = (luma < 128000) ? darkBgArgb : 0xFF181825;
+    }
+    if (darkFgArgb != 0) {
+        Color c = Color::fromArgb(darkFgArgb).opaque();
+        int luma = c.red() * 299 + c.green() * 587 + c.blue() * 114;
+        m_darkFgArgb = (luma >= 128000) ? darkFgArgb : 0xFFCDD6F4;
+    }
+}
+
+bool NativeCanvasSession::renderToPixels(
+    uint8_t* dstPixels, int bmpWidth, int bmpHeight, float originX, float originY
+) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!dstPixels || bmpWidth <= 0 || bmpHeight <= 0 || !m_page) return false;
     if (!m_swPainter) {
-        m_swPainter = std::make_unique<Painter>(Painter::PAINT_SW | Painter::NO_TEXT);
+        m_swPainter = std::make_unique<Painter>(
+            Painter::PAINT_SW | Painter::NO_TEXT | Painter::ALIGN_SCISSOR
+        );
     }
+
+    const Color savedPagePropColor = m_page->props.color;
+    const bool pageIsLight =
+        (savedPagePropColor.red() * 299 + savedPagePropColor.green() * 587 + savedPagePropColor.blue() * 114) >= 128000;
+
+    std::vector<std::pair<SvgNode*, std::vector<SvgAttr>>> savedNodeAttrs;
+    auto saveAttrs = [&](SvgNode* n) {
+        savedNodeAttrs.emplace_back(n, n->attrs);
+    };
+
+    if (m_renderDarkTheme) {
+        const Color darkBg = Color::fromArgb(m_darkBgArgb).opaque();
+        const Color darkFg = Color::fromArgb(m_darkFgArgb).opaque();
+        const Color darkRule = Color::fromArgb(0xFF334155);
+
+        if (pageIsLight) {
+            m_page->props.color = darkBg;
+
+            // 1. Adapt ruling group & paper background rect (.pagerect / .pagebg)
+            if (m_page->ruleNode) {
+                Color ruleGroupStroke = m_page->ruleNode->getColorAttr("stroke", Color::NONE);
+                if (ruleGroupStroke != Color::NONE && ruleGroupStroke != Color::INVALID_COLOR) {
+                    saveAttrs(m_page->ruleNode);
+                    float rop = m_page->ruleNode->getFloatAttr("stroke-opacity", 1.0f);
+                    Color adaptedRule = darkRule;
+                    adaptedRule.setAlphaF(rop);
+                    setSvgStrokeColor(m_page->ruleNode, adaptedRule);
+                }
+                for (SvgNode* rChild : m_page->ruleNode->children()) {
+                    if (!rChild) continue;
+                    if (rChild->hasClass("pagerect") || rChild->hasClass("pagebg")) {
+                        saveAttrs(rChild);
+                        setSvgFillColor(rChild, darkBg);
+                    } else if (!rChild->hasClass("leftmargin") && rChild->type() == SvgNode::PATH) {
+                        Color rc = rChild->getColorAttr("stroke", Color::NONE);
+                        if (rc != Color::NONE && rc != Color::INVALID_COLOR && !(rc.red() > 180 && rc.green() < 80)) {
+                            saveAttrs(rChild);
+                            float rop = rChild->getFloatAttr("stroke-opacity", 1.0f);
+                            Color adaptedRule = darkRule;
+                            adaptedRule.setAlphaF(rop);
+                            setSvgStrokeColor(rChild, adaptedRule);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Adapt standard dark ink strokes in content layer to light foreground
+        auto isDarkInk = [](const Color& c, float opacity) -> bool {
+            return c != Color::NONE && c != Color::INVALID_COLOR &&
+                   c.alpha() > 100 && opacity > 0.4f &&
+                   c.red() < 75 && c.green() < 75 && c.blue() < 85;
+        };
+        auto adaptContentTree = [&](auto& self, SvgNode* node) -> void {
+            if (!node) return;
+            if (auto* container = node->asContainerNode()) {
+                for (SvgNode* child : container->children()) {
+                    self(self, child);
+                }
+            }
+            if (node == m_page->contentNode) return;
+            Color fillCol = node->getColorAttr("fill", Color::NONE);
+            float fillOp = node->getFloatAttr("fill-opacity", 1.0f);
+            Color strokeCol = node->getColorAttr("stroke", Color::NONE);
+            float strokeOp = node->getFloatAttr("stroke-opacity", 1.0f);
+            bool darkFill = isDarkInk(fillCol, fillOp);
+            bool darkStroke = isDarkInk(strokeCol, strokeOp);
+            if (darkFill || darkStroke) {
+                saveAttrs(node);
+                if (darkFill) {
+                    Color f = darkFg;
+                    f.setAlphaF(fillOp);
+                    setSvgFillColor(node, f);
+                }
+                if (darkStroke) {
+                    Color s = darkFg;
+                    s.setAlphaF(strokeOp);
+                    setSvgStrokeColor(node, s);
+                }
+            }
+        };
+        if (m_page->contentNode) {
+            adaptContentTree(adaptContentTree, m_page->contentNode);
+        }
+    } else {
+        const Color lightBg = Color::fromArgb(0xFFFFFDF8).opaque();
+        const Color lightFg = Color::fromArgb(0xFF1E293B).opaque();
+        const Color lightRule = Color::fromArgb(0x334A90E2);
+
+        if (!pageIsLight) {
+            m_page->props.color = lightBg;
+            if (m_page->ruleNode) {
+                Color ruleGroupStroke = m_page->ruleNode->getColorAttr("stroke", Color::NONE);
+                if (ruleGroupStroke != Color::NONE && ruleGroupStroke != Color::INVALID_COLOR) {
+                    saveAttrs(m_page->ruleNode);
+                    setSvgStrokeColor(m_page->ruleNode, lightRule);
+                }
+                for (SvgNode* rChild : m_page->ruleNode->children()) {
+                    if (!rChild) continue;
+                    if (rChild->hasClass("pagerect") || rChild->hasClass("pagebg")) {
+                        saveAttrs(rChild);
+                        setSvgFillColor(rChild, lightBg);
+                    }
+                }
+            }
+        }
+
+        // Adapt near-white strokes drawn in dark mode so they remain visible on light paper
+        auto isWhiteInk = [](const Color& c, float opacity) -> bool {
+            return c != Color::NONE && c != Color::INVALID_COLOR &&
+                   c.alpha() > 100 && opacity > 0.4f &&
+                   c.red() > 205 && c.green() > 205 && c.blue() > 205;
+        };
+        auto adaptLightTree = [&](auto& self, SvgNode* node) -> void {
+            if (!node) return;
+            if (auto* container = node->asContainerNode()) {
+                for (SvgNode* child : container->children()) {
+                    self(self, child);
+                }
+            }
+            if (node == m_page->contentNode) return;
+            Color fillCol = node->getColorAttr("fill", Color::NONE);
+            float fillOp = node->getFloatAttr("fill-opacity", 1.0f);
+            Color strokeCol = node->getColorAttr("stroke", Color::NONE);
+            float strokeOp = node->getFloatAttr("stroke-opacity", 1.0f);
+            bool whiteFill = isWhiteInk(fillCol, fillOp);
+            bool whiteStroke = isWhiteInk(strokeCol, strokeOp);
+            if (whiteFill || whiteStroke) {
+                saveAttrs(node);
+                if (whiteFill) {
+                    Color f = lightFg;
+                    f.setAlphaF(fillOp);
+                    setSvgFillColor(node, f);
+                }
+                if (whiteStroke) {
+                    Color s = lightFg;
+                    s.setAlphaF(strokeOp);
+                    setSvgStrokeColor(node, s);
+                }
+            }
+        };
+        if (m_page->contentNode) {
+            adaptLightTree(adaptLightTree, m_page->contentNode);
+        }
+    }
+
+    const bool isTile = originX != 0.0f || originY != 0.0f;
+    const float scaleX = isTile ? 1.0f : static_cast<float>(bmpWidth) / static_cast<float>(std::max(1, m_width));
+    const float scaleY = isTile ? 1.0f : static_cast<float>(bmpHeight) / static_cast<float>(std::max(1, m_height));
     Image targetImg = Image::fromPixelsNoCopy(bmpWidth, bmpHeight, dstPixels);
-    targetImg.fill(m_page->color().color);
+    targetImg.fill(m_page->props.color.color);
     m_swPainter->setTarget(&targetImg);
     m_swPainter->beginFrame(1.0f);
-    Rect fullRect = Rect::wh(bmpWidth, bmpHeight);
+    if (isTile) {
+        m_swPainter->translate(-originX, -originY);
+    } else if (std::abs(scaleX - 1.0f) > 1e-4f || std::abs(scaleY - 1.0f) > 1e-4f) {
+        m_swPainter->transform(Transform2D(scaleX, 0.0f, 0.0f, scaleY, 0.0f, 0.0f));
+    }
+    Rect fullRect = isTile
+        ? Rect::ltwh(originX, originY, bmpWidth, bmpHeight)
+        : Rect::wh(static_cast<Dim>(m_width), static_cast<Dim>(m_height));
     m_page->draw(m_swPainter.get(), fullRect, /*rulelines=*/true);
     m_swPainter->endFrame();
     m_swPainter->setTarget(nullptr);
     targetImg.data = nullptr;
+
+    m_page->props.color = savedPagePropColor;
+    for (auto it = savedNodeAttrs.rbegin(); it != savedNodeAttrs.rend(); ++it) {
+        it->first->attrs = std::move(it->second);
+    }
+
+    return true;
+}
+
+bool NativeCanvasSession::renderDirtyRectToPixels(
+    uint8_t* dstPixels,
+    int bmpWidth,
+    int bmpHeight,
+    float left,
+    float top,
+    float right,
+    float bottom
+) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!dstPixels || bmpWidth <= 0 || bmpHeight <= 0 || !m_page) return false;
+    if (left >= right || top >= bottom) return false;
+
+    const float scaleX = static_cast<float>(bmpWidth) / static_cast<float>(std::max(1, m_width));
+    const float scaleY = static_cast<float>(bmpHeight) / static_cast<float>(std::max(1, m_height));
+
+    const int pad = 4;
+    const int x0 = std::max(0, static_cast<int>(std::floor(left * scaleX)) - pad);
+    const int y0 = std::max(0, static_cast<int>(std::floor(top * scaleY)) - pad);
+    const int x1 = std::min(bmpWidth, static_cast<int>(std::ceil(right * scaleX)) + pad);
+    const int y1 = std::min(bmpHeight, static_cast<int>(std::ceil(bottom * scaleY)) + pad);
+    const int dirtyW = x1 - x0;
+    const int dirtyH = y1 - y0;
+    if (dirtyW <= 0 || dirtyH <= 0) return false;
+
+    // If the dirty area covers most of the bitmap, fall back to a full-frame render
+    if (static_cast<int64_t>(dirtyW) * dirtyH > (static_cast<int64_t>(bmpWidth) * bmpHeight * 3) / 4) {
+        return renderToPixels(dstPixels, bmpWidth, bmpHeight);
+    }
+
+    if (!m_swPainter) {
+        m_swPainter = std::make_unique<Painter>(
+            Painter::PAINT_SW | Painter::NO_TEXT | Painter::ALIGN_SCISSOR
+        );
+    }
+
+    const Color savedPagePropColor = m_page->props.color;
+    const bool pageIsLight =
+        (savedPagePropColor.red() * 299 + savedPagePropColor.green() * 587 + savedPagePropColor.blue() * 114) >= 128000;
+
+    std::vector<std::pair<SvgNode*, std::vector<SvgAttr>>> savedNodeAttrs;
+    auto saveAttrs = [&](SvgNode* n) {
+        savedNodeAttrs.emplace_back(n, n->attrs);
+    };
+
+    if (m_renderDarkTheme) {
+        const Color darkBg = Color::fromArgb(m_darkBgArgb).opaque();
+        const Color darkFg = Color::fromArgb(m_darkFgArgb).opaque();
+        const Color darkRule = Color::fromArgb(0xFF334155);
+
+        if (pageIsLight) {
+            m_page->props.color = darkBg;
+            if (m_page->ruleNode) {
+                Color ruleGroupStroke = m_page->ruleNode->getColorAttr("stroke", Color::NONE);
+                if (ruleGroupStroke != Color::NONE && ruleGroupStroke != Color::INVALID_COLOR) {
+                    saveAttrs(m_page->ruleNode);
+                    float rop = m_page->ruleNode->getFloatAttr("stroke-opacity", 1.0f);
+                    Color adaptedRule = darkRule;
+                    adaptedRule.setAlphaF(rop);
+                    setSvgStrokeColor(m_page->ruleNode, adaptedRule);
+                }
+                for (SvgNode* rChild : m_page->ruleNode->children()) {
+                    if (!rChild) continue;
+                    if (rChild->hasClass("pagerect") || rChild->hasClass("pagebg")) {
+                        saveAttrs(rChild);
+                        setSvgFillColor(rChild, darkBg);
+                    } else if (!rChild->hasClass("leftmargin") && rChild->type() == SvgNode::PATH) {
+                        Color rc = rChild->getColorAttr("stroke", Color::NONE);
+                        if (rc != Color::NONE && rc != Color::INVALID_COLOR && !(rc.red() > 180 && rc.green() < 80)) {
+                            saveAttrs(rChild);
+                            float rop = rChild->getFloatAttr("stroke-opacity", 1.0f);
+                            Color adaptedRule = darkRule;
+                            adaptedRule.setAlphaF(rop);
+                            setSvgStrokeColor(rChild, adaptedRule);
+                        }
+                    }
+                }
+            }
+        }
+
+        auto isDarkInk = [](const Color& c, float opacity) -> bool {
+            return c != Color::NONE && c != Color::INVALID_COLOR &&
+                   c.alpha() > 100 && opacity > 0.4f &&
+                   c.red() < 75 && c.green() < 75 && c.blue() < 85;
+        };
+        auto adaptContentTree = [&](auto& self, SvgNode* node) -> void {
+            if (!node) return;
+            if (auto* container = node->asContainerNode()) {
+                for (SvgNode* child : container->children()) {
+                    self(self, child);
+                }
+            }
+            if (node == m_page->contentNode) return;
+            Color fillCol = node->getColorAttr("fill", Color::NONE);
+            float fillOp = node->getFloatAttr("fill-opacity", 1.0f);
+            Color strokeCol = node->getColorAttr("stroke", Color::NONE);
+            float strokeOp = node->getFloatAttr("stroke-opacity", 1.0f);
+            bool darkFill = isDarkInk(fillCol, fillOp);
+            bool darkStroke = isDarkInk(strokeCol, strokeOp);
+            if (darkFill || darkStroke) {
+                saveAttrs(node);
+                if (darkFill) {
+                    Color f = darkFg;
+                    f.setAlphaF(fillOp);
+                    setSvgFillColor(node, f);
+                }
+                if (darkStroke) {
+                    Color s = darkFg;
+                    s.setAlphaF(strokeOp);
+                    setSvgStrokeColor(node, s);
+                }
+            }
+        };
+        if (m_page->contentNode) {
+            adaptContentTree(adaptContentTree, m_page->contentNode);
+        }
+    } else if (!pageIsLight) {
+        const Color lightBg = Color::fromArgb(0xFFFFFDF8).opaque();
+        const Color lightFg = Color::fromArgb(0xFF1E293B).opaque();
+        const Color lightRule = Color::fromArgb(0x334A90E2);
+        m_page->props.color = lightBg;
+        if (m_page->ruleNode) {
+            Color ruleGroupStroke = m_page->ruleNode->getColorAttr("stroke", Color::NONE);
+            if (ruleGroupStroke != Color::NONE && ruleGroupStroke != Color::INVALID_COLOR) {
+                saveAttrs(m_page->ruleNode);
+                setSvgStrokeColor(m_page->ruleNode, lightRule);
+            }
+            for (SvgNode* rChild : m_page->ruleNode->children()) {
+                if (!rChild) continue;
+                if (rChild->hasClass("pagerect") || rChild->hasClass("pagebg")) {
+                    saveAttrs(rChild);
+                    setSvgFillColor(rChild, lightBg);
+                }
+            }
+        }
+        auto isWhiteInk = [](const Color& c, float opacity) -> bool {
+            return c != Color::NONE && c != Color::INVALID_COLOR &&
+                   c.alpha() > 100 && opacity > 0.4f &&
+                   c.red() > 205 && c.green() > 205 && c.blue() > 205;
+        };
+        auto adaptLightTree = [&](auto& self, SvgNode* node) -> void {
+            if (!node) return;
+            if (auto* container = node->asContainerNode()) {
+                for (SvgNode* child : container->children()) {
+                    self(self, child);
+                }
+            }
+            if (node == m_page->contentNode) return;
+            Color fillCol = node->getColorAttr("fill", Color::NONE);
+            float fillOp = node->getFloatAttr("fill-opacity", 1.0f);
+            Color strokeCol = node->getColorAttr("stroke", Color::NONE);
+            float strokeOp = node->getFloatAttr("stroke-opacity", 1.0f);
+            bool whiteFill = isWhiteInk(fillCol, fillOp);
+            bool whiteStroke = isWhiteInk(strokeCol, strokeOp);
+            if (whiteFill || whiteStroke) {
+                saveAttrs(node);
+                if (whiteFill) {
+                    Color f = lightFg;
+                    f.setAlphaF(fillOp);
+                    setSvgFillColor(node, f);
+                }
+                if (whiteStroke) {
+                    Color s = lightFg;
+                    s.setAlphaF(strokeOp);
+                    setSvgStrokeColor(node, s);
+                }
+            }
+        };
+        if (m_page->contentNode) {
+            adaptLightTree(adaptLightTree, m_page->contentNode);
+        }
+    }
+
+    // Clear only the dirty sub-rectangle rows in the target RGBA buffer
+    const uint32_t bgPixel = m_page->props.color.color;
+    uint32_t* pixelRows = reinterpret_cast<uint32_t*>(dstPixels);
+    for (int y = y0; y < y1; ++y) {
+        std::fill_n(pixelRows + static_cast<size_t>(y) * bmpWidth + x0, dirtyW, bgPixel);
+    }
+
+    Image targetImg = Image::fromPixelsNoCopy(bmpWidth, bmpHeight, dstPixels);
+    m_swPainter->setTarget(&targetImg);
+    m_swPainter->beginFrame(1.0f);
+    if (std::abs(scaleX - 1.0f) > 1e-4f || std::abs(scaleY - 1.0f) > 1e-4f) {
+        m_swPainter->transform(Transform2D(scaleX, 0.0f, 0.0f, scaleY, 0.0f, 0.0f));
+    }
+    Rect clipRect = Rect::ltrb(
+        static_cast<Dim>(x0) / scaleX,
+        static_cast<Dim>(y0) / scaleY,
+        static_cast<Dim>(x1) / scaleX,
+        static_cast<Dim>(y1) / scaleY
+    );
+    m_swPainter->setClipRect(clipRect);
+    m_page->draw(m_swPainter.get(), clipRect, /*rulelines=*/true);
+    m_swPainter->endFrame();
+    m_swPainter->setTarget(nullptr);
+    targetImg.data = nullptr;
+
+    m_page->props.color = savedPagePropColor;
+    for (auto it = savedNodeAttrs.rbegin(); it != savedNodeAttrs.rend(); ++it) {
+        it->first->attrs = std::move(it->second);
+    }
+
     return true;
 }
 
@@ -393,6 +863,7 @@ void NativeCanvasSession::setPen(
     bool lineDrawing,
     float chiselAngle
 ) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     m_penColor = Color::fromArgb(static_cast<uint32_t>(colorArgb)).color;
     m_penWidth = strokeWidth;
     m_pressureSensitive = pressureSensitive;
@@ -413,6 +884,7 @@ void NativeCanvasSession::snapPointIfEnabled(float* inoutX, float* inoutY) const
 void NativeCanvasSession::beginStroke(
     float x, float y, float pressure, float tiltX, float tiltY, double timestampMs
 ) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     snapPointIfEnabled(&x, &y);
     unsigned int penFlags = 0u;
     if (m_penTipType == 2) {
@@ -447,9 +919,13 @@ void NativeCanvasSession::beginStroke(
     if (!m_lineDrawing && !m_snapToGrid) {
         m_activeStroke->addFilter(new SimplifyFilter(0.15f, 0.08f));
     }
+    m_activeInputPoints.clear();
+    m_activeStrokeSnapped = false;
+    m_activeInputPoints.push_back({x, y, timestampMs});
     if (m_lineDrawing) {
         // Add two initial points for line drawing since moveStroke replaces the endpoint
         m_activeStroke->addInputPoint(StrokePoint(x, y, 0.5f, 0, 0, static_cast<Timestamp>(timestampMs)));
+        m_activeInputPoints.push_back({x, y, timestampMs});
     }
     m_activeStroke->addInputPoint(StrokePoint(x, y, pressure, tiltX, tiltY, static_cast<Timestamp>(timestampMs)));
 }
@@ -457,7 +933,9 @@ void NativeCanvasSession::beginStroke(
 void NativeCanvasSession::moveStroke(
     float x, float y, float pressure, float tiltX, float tiltY, double timestampMs
 ) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_activeStroke) return;
+    if (m_activeStrokeSnapped) return; // Once hold-to-snap locked, ignore minor micro-jitter until lift
     snapPointIfEnabled(&x, &y);
     if (m_lineDrawing) {
         m_activeStroke->removePoints(1);
@@ -465,8 +943,267 @@ void NativeCanvasSession::moveStroke(
             m_activeStroke->addInputPoint(StrokePoint(x, y, 0.5f, 0, 0, static_cast<Timestamp>(timestampMs)));
         }
         m_activeStroke->addInputPoint(StrokePoint(x, y, 0.5f, 0, 0, static_cast<Timestamp>(timestampMs)));
+        if (m_activeInputPoints.size() >= 2) {
+            m_activeInputPoints.back() = {x, y, timestampMs};
+        } else {
+            m_activeInputPoints.push_back({x, y, timestampMs});
+        }
     } else {
         m_activeStroke->addInputPoint(StrokePoint(x, y, pressure, tiltX, tiltY, static_cast<Timestamp>(timestampMs)));
+        m_activeInputPoints.push_back({x, y, timestampMs});
+    }
+}
+
+int NativeCanvasSession::snapActiveStrokeToShape(
+    float* outSnappedPoints, int maxFloats, int* outNumPoints
+) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (outNumPoints) *outNumPoints = 0;
+    if (!m_activeStroke || m_activeStrokeSnapped || m_activeInputPoints.size() < 5) {
+        return 0;
+    }
+
+    const size_t N = m_activeInputPoints.size();
+    float minX = m_activeInputPoints[0].x, maxX = minX;
+    float minY = m_activeInputPoints[0].y, maxY = minY;
+    float totalLen = 0.0f;
+
+    for (size_t i = 0; i < N; ++i) {
+        float px = m_activeInputPoints[i].x;
+        float py = m_activeInputPoints[i].y;
+        minX = std::min(minX, px);
+        maxX = std::max(maxX, px);
+        minY = std::min(minY, py);
+        maxY = std::max(maxY, py);
+        if (i > 0) {
+            totalLen += std::hypot(px - m_activeInputPoints[i - 1].x,
+                                   py - m_activeInputPoints[i - 1].y);
+        }
+    }
+    if (totalLen < 36.0f) return 0;
+
+    const float x0 = m_activeInputPoints.front().x;
+    const float y0 = m_activeInputPoints.front().y;
+    const float xN = m_activeInputPoints.back().x;
+    const float yN = m_activeInputPoints.back().y;
+    const float chordLen = std::hypot(xN - x0, yN - y0);
+    const float w = maxX - minX;
+    const float h = maxY - minY;
+
+    auto perpDistToSeg = [](float px, float py, float ax, float ay, float bx, float by) -> float {
+        float dx = bx - ax, dy = by - ay;
+        float lenSq = dx * dx + dy * dy;
+        if (lenSq < 1e-4f) return std::hypot(px - ax, py - ay);
+        return std::abs(dy * px - dx * py + bx * ay - by * ax) / std::sqrt(lenSq);
+    };
+
+    int detectedShape = 0; // 1=Line, 2=Arrow, 3=Rectangle, 4=Ellipse
+    std::vector<std::pair<float, float>> geomPts;
+
+    // 1. Check Straight Line
+    if (chordLen >= 32.0f) {
+        float maxPerp = 0.0f;
+        for (size_t i = 1; i + 1 < N; ++i) {
+            maxPerp = std::max(maxPerp, perpDistToSeg(m_activeInputPoints[i].x, m_activeInputPoints[i].y, x0, y0, xN, yN));
+        }
+        if (maxPerp / chordLen < 0.085f && (chordLen / totalLen) > 0.87f) {
+            float sx = x0, sy = y0, ex = xN, ey = yN;
+            float angle = std::atan2(ey - sy, ex - sx);
+            // Snap to horizontal / vertical if within ~5 degrees
+            if (std::abs(angle) < 0.087f || std::abs(std::abs(angle) - 3.14159265f) < 0.087f) {
+                ey = sy;
+            } else if (std::abs(std::abs(angle) - 1.5707963f) < 0.087f) {
+                ex = sx;
+            }
+            snapPointIfEnabled(&sx, &sy);
+            snapPointIfEnabled(&ex, &ey);
+            geomPts.push_back({sx, sy});
+            geomPts.push_back({ex, ey});
+            detectedShape = 1;
+        }
+    }
+
+    // 2. Check Single-Stroke Connector Arrow (straight shaft + hooked tip at the end)
+    if (detectedShape == 0 && totalLen >= 48.0f && N >= 8) {
+        size_t tipIdx = 0;
+        float maxDistFromStart = 0.0f;
+        for (size_t i = N / 2; i < N; ++i) {
+            float d = std::hypot(m_activeInputPoints[i].x - x0, m_activeInputPoints[i].y - y0);
+            if (d > maxDistFromStart) {
+                maxDistFromStart = d;
+                tipIdx = i;
+            }
+        }
+        if (tipIdx >= 3 && tipIdx + 2 < N && maxDistFromStart >= 36.0f) {
+            float tipX = m_activeInputPoints[tipIdx].x;
+            float tipY = m_activeInputPoints[tipIdx].y;
+            float maxShaftPerp = 0.0f;
+            float shaftLen = 0.0f;
+            for (size_t i = 1; i <= tipIdx; ++i) {
+                shaftLen += std::hypot(m_activeInputPoints[i].x - m_activeInputPoints[i - 1].x,
+                                       m_activeInputPoints[i].y - m_activeInputPoints[i - 1].y);
+                maxShaftPerp = std::max(maxShaftPerp,
+                                        perpDistToSeg(m_activeInputPoints[i].x, m_activeInputPoints[i].y, x0, y0, tipX, tipY));
+            }
+            float tailHookDist = std::hypot(xN - tipX, yN - tipY);
+            if (maxShaftPerp / maxDistFromStart < 0.095f &&
+                (maxDistFromStart / std::max(1.0f, shaftLen)) > 0.86f &&
+                tailHookDist >= 10.0f && tailHookDist <= maxDistFromStart * 0.45f) {
+                float sx = x0, sy = y0, tx = tipX, ty = tipY;
+                float angle = std::atan2(ty - sy, tx - sx);
+                float barbLen = std::clamp(maxDistFromStart * 0.18f, 14.0f, 28.0f);
+                float barbAngle1 = angle + 3.14159265f - 0.48f; // ~152 deg
+                float barbAngle2 = angle + 3.14159265f + 0.48f;
+                float b1x = tx + barbLen * std::cos(barbAngle1);
+                float b1y = ty + barbLen * std::sin(barbAngle1);
+                float b2x = tx + barbLen * std::cos(barbAngle2);
+                float b2y = ty + barbLen * std::sin(barbAngle2);
+                geomPts.push_back({sx, sy});
+                geomPts.push_back({tx, ty});
+                geomPts.push_back({b1x, b1y});
+                geomPts.push_back({tx, ty});
+                geomPts.push_back({b2x, b2y});
+                detectedShape = 2;
+            }
+        }
+    }
+
+    // 3. Check Closed Shapes (Rectangle or Circle/Ellipse)
+    if (detectedShape == 0 && chordLen < 0.30f * totalLen && w >= 24.0f && h >= 24.0f) {
+        float cx = (minX + maxX) * 0.5f;
+        float cy = (minY + maxY) * 0.5f;
+        float rx = w * 0.5f;
+        float ry = h * 0.5f;
+        float minDim = std::min(w, h);
+
+        float sumBoxDist = 0.0f;
+        float sumEllipseErrSq = 0.0f;
+        for (size_t i = 0; i < N; ++i) {
+            float px = m_activeInputPoints[i].x;
+            float py = m_activeInputPoints[i].y;
+            float dLeft = std::abs(px - minX);
+            float dRight = std::abs(maxX - px);
+            float dTop = std::abs(py - minY);
+            float dBottom = std::abs(maxY - py);
+            float dEdge = std::min(std::min(dLeft, dRight), std::min(dTop, dBottom));
+            sumBoxDist += dEdge;
+
+            float nx = (px - cx) / std::max(1.0f, rx);
+            float ny = (py - cy) / std::max(1.0f, ry);
+            float rNorm = std::hypot(nx, ny);
+            float err = rNorm - 1.0f;
+            sumEllipseErrSq += err * err;
+        }
+        float avgBoxRel = (sumBoxDist / static_cast<float>(N)) / minDim;
+        float rmsEllipseErr = std::sqrt(sumEllipseErrSq / static_cast<float>(N));
+
+        if (avgBoxRel < 0.115f && avgBoxRel < rmsEllipseErr * 0.82f) {
+            // Axis-aligned Rectangle
+            float l = minX, t = minY, r = maxX, b = maxY;
+            snapPointIfEnabled(&l, &t);
+            snapPointIfEnabled(&r, &b);
+            geomPts.push_back({l, t});
+            geomPts.push_back({r, t});
+            geomPts.push_back({r, b});
+            geomPts.push_back({l, b});
+            geomPts.push_back({l, t});
+            detectedShape = 3;
+        } else if (rmsEllipseErr < 0.185f) {
+            // Circle or Ellipse (snap to true circle if aspect ratio is close to 1:1)
+            if (std::abs(rx - ry) / std::max(rx, ry) < 0.18f) {
+                rx = ry = (rx + ry) * 0.5f;
+            }
+            const int segs = 48;
+            for (int s = 0; s <= segs; ++s) {
+                float theta = (2.0f * 3.14159265f * static_cast<float>(s)) / static_cast<float>(segs);
+                geomPts.push_back({cx + rx * std::cos(theta), cy + ry * std::sin(theta)});
+            }
+            detectedShape = 4;
+        }
+    }
+
+    if (detectedShape == 0 || geomPts.size() < 2) {
+        return 0;
+    }
+
+    // Rebuild m_activeStroke with crisp geometric segments
+    unsigned int penFlags = ScribblePen::TIP_ROUND;
+    if (Color(m_penColor).alpha() < 255) {
+        penFlags |= ScribblePen::DRAW_UNDER;
+    }
+    ScribblePen geomPen(
+        Color(m_penColor),
+        static_cast<Dim>(m_penWidth),
+        penFlags,
+        /*wr=*/0.7f,
+        /*pr=*/1.0f,
+        /*spd=*/0.0f,
+        /*angle=*/0.0f
+    );
+    m_activeStroke.reset(StrokeBuilder::create(geomPen));
+    double ts = m_activeInputPoints.front().ts;
+    for (size_t i = 0; i < geomPts.size(); ++i) {
+        // Interpolate intermediate points along long straight segments so Write's stroke mesh is sharp at corners
+        if (i > 0 && detectedShape != 4) {
+            float ax = geomPts[i - 1].first, ay = geomPts[i - 1].second;
+            float bx = geomPts[i].first, by = geomPts[i].second;
+            float segLen = std::hypot(bx - ax, by - ay);
+            int steps = std::clamp(static_cast<int>(segLen / 12.0f), 2, 24);
+            for (int k = 1; k <= steps; ++k) {
+                float frac = static_cast<float>(k) / static_cast<float>(steps);
+                float ix = ax + (bx - ax) * frac;
+                float iy = ay + (by - ay) * frac;
+                ts += 2.0;
+                m_activeStroke->addInputPoint(StrokePoint(ix, iy, 0.5f, 0, 0, static_cast<Timestamp>(ts)));
+            }
+        } else {
+            ts += 2.0;
+            m_activeStroke->addInputPoint(
+                StrokePoint(geomPts[i].first, geomPts[i].second, 0.5f, 0, 0, static_cast<Timestamp>(ts))
+            );
+        }
+    }
+
+    m_activeStrokeSnapped = true;
+
+    int countPts = std::min(static_cast<int>(geomPts.size()), maxFloats / 2);
+    if (outSnappedPoints && countPts > 0) {
+        for (int i = 0; i < countPts; ++i) {
+            outSnappedPoints[i * 2] = geomPts[i].first;
+            outSnappedPoints[i * 2 + 1] = geomPts[i].second;
+        }
+    }
+    if (outNumPoints) *outNumPoints = countPts;
+    return detectedShape;
+}
+
+void NativeCanvasSession::moveStrokeBatch(const float* pointsData6, int pointCount) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_activeStroke || m_activeStrokeSnapped || !pointsData6 || pointCount <= 0) return;
+    for (int i = 0; i < pointCount; ++i) {
+        const float* pt = pointsData6 + (i * 6);
+        float x = pt[0];
+        float y = pt[1];
+        float pressure = pt[2];
+        float tiltX = pt[3];
+        float tiltY = pt[4];
+        double ts = static_cast<double>(pt[5]);
+        snapPointIfEnabled(&x, &y);
+        if (m_lineDrawing) {
+            m_activeStroke->removePoints(1);
+            if (m_activeStroke->getPath()->empty()) {
+                m_activeStroke->addInputPoint(StrokePoint(x, y, 0.5f, 0, 0, static_cast<Timestamp>(ts)));
+            }
+            m_activeStroke->addInputPoint(StrokePoint(x, y, 0.5f, 0, 0, static_cast<Timestamp>(ts)));
+            if (m_activeInputPoints.size() >= 2) {
+                m_activeInputPoints.back() = {x, y, ts};
+            } else {
+                m_activeInputPoints.push_back({x, y, ts});
+            }
+        } else {
+            m_activeStroke->addInputPoint(StrokePoint(x, y, pressure, tiltX, tiltY, static_cast<Timestamp>(ts)));
+            m_activeInputPoints.push_back({x, y, ts});
+        }
     }
 }
 
@@ -499,15 +1236,25 @@ void NativeCanvasSession::autoExpandForBounds(float maxRight, float maxBottom, i
         }
         m_width = targetW;
         m_height = targetH;
-        rebuildProceduralRuleLayer();
+        if (m_rulingStyle != RULING_STANDARD) {
+            rebuildProceduralRuleLayer();
+        }
     }
     if (outNewWidth) *outNewWidth = m_width;
     if (outNewHeight) *outNewHeight = m_height;
 }
 
-std::string NativeCanvasSession::endStroke(bool* outHeightExpanded, int* outNewHeight) {
+std::string NativeCanvasSession::endStroke(
+    bool* outHeightExpanded,
+    int* outNewHeight,
+    float* outDirtyBounds4
+) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (outHeightExpanded) *outHeightExpanded = false;
     if (outNewHeight) *outNewHeight = m_height;
+    if (outDirtyBounds4) {
+        outDirtyBounds4[0] = outDirtyBounds4[1] = outDirtyBounds4[2] = outDirtyBounds4[3] = 0.0f;
+    }
     if (!m_activeStroke || !m_page) return "";
 
     Element* elem = m_activeStroke->finish();
@@ -529,7 +1276,7 @@ std::string NativeCanvasSession::endStroke(bool* outHeightExpanded, int* outNewH
     }
     m_page->addStroke(elem, beforeElem);
 
-    Rect bbox = elem->bbox();
+    Rect bbox = elem->bbox().pad(m_penWidth + 4.0f);
     int newW = m_width, newH = m_height;
     autoExpandForBounds(bbox.right, bbox.bottom, &newW, &newH);
     if (newH != prevHeight) {
@@ -538,18 +1285,51 @@ std::string NativeCanvasSession::endStroke(bool* outHeightExpanded, int* outNewH
     }
     m_doc->history->endAction();
 
+    if (outDirtyBounds4) {
+        if (!bbox.isValid()) {
+            outDirtyBounds4[0] = 0.0f;
+            outDirtyBounds4[1] = 0.0f;
+            outDirtyBounds4[2] = static_cast<float>(m_width);
+            outDirtyBounds4[3] = static_cast<float>(m_height);
+        } else {
+            outDirtyBounds4[0] = static_cast<float>(bbox.left);
+            outDirtyBounds4[1] = static_cast<float>(bbox.top);
+            outDirtyBounds4[2] = static_cast<float>(bbox.right);
+            outDirtyBounds4[3] = static_cast<float>(bbox.bottom);
+        }
+    }
+
     MemStream xmlBuf;
     SvgWriter::save(elem->node, xmlBuf, "");
     return std::string(xmlBuf.data(), xmlBuf.size());
 }
 
-bool NativeCanvasSession::eraseAt(float x, float y, float radius) {
+bool NativeCanvasSession::eraseAt(float x, float y, float radius, float* outDirtyBounds4) {
+    return eraseSegment(x, y, x, y, radius, outDirtyBounds4);
+}
+
+bool NativeCanvasSession::eraseSegment(
+    float prevX,
+    float prevY,
+    float x,
+    float y,
+    float radius,
+    float* outDirtyBounds4
+) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (outDirtyBounds4) {
+        outDirtyBounds4[0] = outDirtyBounds4[1] = outDirtyBounds4[2] = outDirtyBounds4[3] = 0.0f;
+    }
     if (!m_page) return false;
-    Rect hitBox = Rect::ltwh(x - radius, y - radius, radius * 2.0f, radius * 2.0f);
+    Point p0(prevX, prevY);
+    Point p1(x, y);
+    Rect hitBox = Rect::corners(p0, p1).pad(radius);
     std::vector<Element*> toRemove;
+    Rect dirty;
     for (Element* el : m_page->children()) {
         if (el && el->bbox().intersects(hitBox)) {
             toRemove.push_back(el);
+            dirty.rectUnion(el->bbox());
         }
     }
     if (toRemove.empty()) return false;
@@ -560,16 +1340,29 @@ bool NativeCanvasSession::eraseAt(float x, float y, float radius) {
     }
     m_doc->history->endAction();
     sanitizeSelection();
+    if (outDirtyBounds4 && dirty.isValid()) {
+        Rect padded = dirty.pad(6.0f);
+        outDirtyBounds4[0] = static_cast<float>(padded.left);
+        outDirtyBounds4[1] = static_cast<float>(padded.top);
+        outDirtyBounds4[2] = static_cast<float>(padded.right);
+        outDirtyBounds4[3] = static_cast<float>(padded.bottom);
+    }
     return true;
 }
 
-bool NativeCanvasSession::eraseRuledLineAt(float y) {
+bool NativeCanvasSession::eraseRuledLineAt(float y, float* outDirtyBounds4) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (outDirtyBounds4) {
+        outDirtyBounds4[0] = outDirtyBounds4[1] = outDirtyBounds4[2] = outDirtyBounds4[3] = 0.0f;
+    }
     if (!m_page) return false;
     int targetLine = m_page->getLine(static_cast<Dim>(y));
     std::vector<Element*> toRemove;
+    Rect dirty;
     for (Element* el : m_page->children()) {
         if (el && m_page->getLine(el) == targetLine) {
             toRemove.push_back(el);
+            dirty.rectUnion(el->bbox());
         }
     }
     if (toRemove.empty()) return false;
@@ -580,10 +1373,28 @@ bool NativeCanvasSession::eraseRuledLineAt(float y) {
     }
     m_doc->history->endAction();
     sanitizeSelection();
+    if (outDirtyBounds4 && dirty.isValid()) {
+        Rect padded = dirty.pad(6.0f);
+        outDirtyBounds4[0] = static_cast<float>(padded.left);
+        outDirtyBounds4[1] = static_cast<float>(padded.top);
+        outDirtyBounds4[2] = static_cast<float>(padded.right);
+        outDirtyBounds4[3] = static_cast<float>(padded.bottom);
+    }
     return true;
 }
 
-bool NativeCanvasSession::eraseFreeSegment(float prevX, float prevY, float x, float y, float radius) {
+bool NativeCanvasSession::eraseFreeSegment(
+    float prevX,
+    float prevY,
+    float x,
+    float y,
+    float radius,
+    float* outDirtyBounds4
+) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (outDirtyBounds4) {
+        outDirtyBounds4[0] = outDirtyBounds4[1] = outDirtyBounds4[2] = outDirtyBounds4[3] = 0.0f;
+    }
     if (!m_page) return false;
     Point p0(prevX, prevY);
     Point p1(x, y);
@@ -594,14 +1405,17 @@ bool NativeCanvasSession::eraseFreeSegment(float prevX, float prevY, float x, fl
         Element* next;
     };
     std::vector<TouchedStroke> touchedList;
+    Rect dirty;
 
     auto strokes = m_page->children();
     for (auto it = strokes.begin(); it != strokes.end();) {
         Element* el = *it++;
         Element* nextEl = (it != strokes.end()) ? *it : nullptr;
         if (!el || !el->bbox().intersects(hitBox)) continue;
+        Rect origBBox = el->bbox();
         if (el->freeErase(p0, p1, static_cast<Dim>(radius))) {
             touchedList.push_back({el, nextEl});
+            dirty.rectUnion(origBBox);
         }
     }
     if (touchedList.empty()) return false;
@@ -618,15 +1432,24 @@ bool NativeCanvasSession::eraseFreeSegment(float prevX, float prevY, float x, fl
                 std::string strokeId = "s_" + std::to_string(m_strokeSeq);
                 sub->node->setXmlId(strokeId.c_str());
                 m_page->addStroke(sub, nexts);
+                dirty.rectUnion(sub->bbox());
             }
         }
     }
     m_doc->history->endAction();
     sanitizeSelection();
+    if (outDirtyBounds4 && dirty.isValid()) {
+        Rect padded = dirty.pad(6.0f);
+        outDirtyBounds4[0] = static_cast<float>(padded.left);
+        outDirtyBounds4[1] = static_cast<float>(padded.top);
+        outDirtyBounds4[2] = static_cast<float>(padded.right);
+        outDirtyBounds4[3] = static_cast<float>(padded.bottom);
+    }
     return true;
 }
 
 bool NativeCanvasSession::resizeCanvas(int newWidth, int newHeight) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_page) return false;
     m_doc->history->startAction(0);
     PageProperties props = m_page->getProperties();
@@ -636,11 +1459,70 @@ bool NativeCanvasSession::resizeCanvas(int newWidth, int newHeight) {
     if (m_page->svgDoc) {
         m_page->svgDoc->setViewBox(Rect());
     }
-    rebuildProceduralRuleLayer();
+    if (m_rulingStyle != RULING_STANDARD) {
+        rebuildProceduralRuleLayer();
+    }
     m_doc->history->endAction();
     m_width = newWidth;
     m_height = newHeight;
     return true;
+}
+
+bool NativeCanvasSession::trimBottomWhitespace(int paddingPx, int* outNewHeight) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (outNewHeight) *outNewHeight = m_height;
+    if (!m_page) return false;
+    float maxBottom = 0.0f;
+    for (Element* el : m_page->children()) {
+        if (el) {
+            maxBottom = std::max<float>(maxBottom, el->bbox().bottom);
+        }
+    }
+    int targetH = std::max(280, static_cast<int>( std::ceil(maxBottom) ) + std::max(16, paddingPx));
+    if (m_yRuling > 0) {
+        targetH = ((targetH + m_yRuling - 1) / m_yRuling) * m_yRuling;
+    }
+    if (targetH == m_height) {
+        return false;
+    }
+    m_doc->history->startAction(0);
+    PageProperties props = m_page->getProperties();
+    props.height = static_cast<Dim>(targetH);
+    m_page->setProperties(&props);
+    if (m_page->svgDoc) {
+        m_page->svgDoc->setViewBox(Rect());
+    }
+    m_height = targetH;
+    rebuildProceduralRuleLayer();
+    m_doc->history->endAction();
+    if (outNewHeight) *outNewHeight = m_height;
+    return true;
+}
+
+bool NativeCanvasSession::setTemplateImageOpacity(float opacity) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_page) return false;
+    float clamped = std::clamp(opacity, 0.1f, 1.0f);
+    bool updated = false;
+    auto applyImgOpacity = [&](auto& self, SvgNode* node) -> void {
+        if (!node) return;
+        if (node->type() == SvgNode::IMAGE) {
+            node->setAttr("opacity", clamped);
+            node->setAttr("fill-opacity", clamped);
+            updated = true;
+        }
+        if (auto* container = node->asContainerNode()) {
+            for (SvgNode* ch : container->children()) {
+                self(self, ch);
+            }
+        }
+    };
+    if (m_page->ruleNode) applyImgOpacity(applyImgOpacity, m_page->ruleNode);
+    if (m_page->contentNode) applyImgOpacity(applyImgOpacity, m_page->contentNode);
+    if (updated && m_page->svgDoc) {
+        m_page->svgDoc->setDirty(SvgNode::PIXELS_DIRTY);
+    }
+    return updated;
 }
 
 void NativeCanvasSession::sanitizeSelection() {
@@ -680,6 +1562,7 @@ void NativeCanvasSession::computeSelectionBounds(float* outBounds4) const {
 }
 
 int NativeCanvasSession::selectRect(float left, float top, float right, float bottom, float* outBounds4) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     m_selectedElements.clear();
     if (!m_page) {
         computeSelectionBounds(outBounds4);
@@ -703,6 +1586,7 @@ int NativeCanvasSession::selectRect(float left, float top, float right, float bo
 }
 
 int NativeCanvasSession::selectLasso(const float* xyPoints, int numFloats, float* outBounds4) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     m_selectedElements.clear();
     if (!m_page || !xyPoints || numFloats < 6) {
         computeSelectionBounds(outBounds4);
@@ -744,7 +1628,7 @@ int NativeCanvasSession::selectLasso(const float* xyPoints, int numFloats, float
                     size_t pSize = p->size();
                     size_t step = std::max<size_t>(1, pSize / 8);
                     for (size_t pi = 0; pi < pSize; pi += step) {
-                        Point pt = (*p)[pi];
+                        Point pt = p->point(static_cast<int>(pi));
                         if (isPointInPolygon(pt.x, pt.y, xyPoints, numFloats)) {
                             inside = true;
                             break;
@@ -763,6 +1647,7 @@ int NativeCanvasSession::selectLasso(const float* xyPoints, int numFloats, float
 }
 
 int NativeCanvasSession::selectRuled(float startY, float endY, float* outBounds4) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     m_selectedElements.clear();
     if (!m_page) {
         computeSelectionBounds(outBounds4);
@@ -784,6 +1669,7 @@ int NativeCanvasSession::selectRuled(float startY, float endY, float* outBounds4
 }
 
 int NativeCanvasSession::selectAll(float* outBounds4) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     m_selectedElements.clear();
     if (!m_page) {
         computeSelectionBounds(outBounds4);
@@ -797,10 +1683,12 @@ int NativeCanvasSession::selectAll(float* outBounds4) {
 }
 
 void NativeCanvasSession::clearSelection() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     m_selectedElements.clear();
 }
 
 bool NativeCanvasSession::getSelectionBounds(float* outBounds4) const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (m_selectedElements.empty()) return false;
     computeSelectionBounds(outBounds4);
     return true;
@@ -813,6 +1701,7 @@ bool NativeCanvasSession::translateSelection(
     int* outNewWidth,
     int* outNewHeight
 ) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     sanitizeSelection();
     if (outNewWidth) *outNewWidth = m_width;
     if (outNewHeight) *outNewHeight = m_height;
@@ -848,6 +1737,7 @@ bool NativeCanvasSession::scaleSelection(
     int* outNewWidth,
     int* outNewHeight
 ) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     sanitizeSelection();
     if (outNewWidth) *outNewWidth = m_width;
     if (outNewHeight) *outNewHeight = m_height;
@@ -890,6 +1780,7 @@ bool NativeCanvasSession::rotateSelection(
     int* outNewWidth,
     int* outNewHeight
 ) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     sanitizeSelection();
     if (outNewWidth) *outNewWidth = m_width;
     if (outNewHeight) *outNewHeight = m_height;
@@ -915,6 +1806,7 @@ bool NativeCanvasSession::rotateSelection(
 }
 
 bool NativeCanvasSession::deleteSelection() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     sanitizeSelection();
     if (!m_page || m_selectedElements.empty()) return false;
     m_doc->history->startAction(0);
@@ -933,12 +1825,22 @@ bool NativeCanvasSession::deleteSelection() {
     return true;
 }
 
-int NativeCanvasSession::duplicateSelection(float offsetX, float offsetY, float* outBounds4) {
+int NativeCanvasSession::duplicateSelection(
+    float offsetX,
+    float offsetY,
+    float* outBounds4,
+    int* outNewWidth,
+    int* outNewHeight
+) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     sanitizeSelection();
+    if (outNewWidth) *outNewWidth = m_width;
+    if (outNewHeight) *outNewHeight = m_height;
     if (!m_page || m_selectedElements.empty()) return 0;
 
     std::vector<Element*> clones;
     m_doc->history->startAction(0);
+    Dim maxRight = 0, maxBottom = 0;
     for (Element* el : m_selectedElements) {
         if (!el) continue;
         Element* copy = el->cloneNode();
@@ -950,7 +1852,10 @@ int NativeCanvasSession::duplicateSelection(float offsetX, float offsetY, float*
         copy->commitTransform();
         m_page->addStroke(copy);
         clones.push_back(copy);
+        maxRight = std::max(maxRight, copy->bbox().right);
+        maxBottom = std::max(maxBottom, copy->bbox().bottom);
     }
+    autoExpandForBounds(maxRight, maxBottom, outNewWidth, outNewHeight);
     m_doc->history->endAction();
     m_selectedElements = std::move(clones);
     computeSelectionBounds(outBounds4);
@@ -958,6 +1863,7 @@ int NativeCanvasSession::duplicateSelection(float offsetX, float offsetY, float*
 }
 
 bool NativeCanvasSession::restyleSelection(int colorArgb, float strokeWidth) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     sanitizeSelection();
     if (!m_page || m_selectedElements.empty()) return false;
 
@@ -975,6 +1881,7 @@ bool NativeCanvasSession::restyleSelection(int colorArgb, float strokeWidth) {
 }
 
 std::string NativeCanvasSession::copySelectionSvg() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_page || m_selectedElements.empty()) return "";
     SvgG container;
     for (Element* el : m_selectedElements) {
@@ -994,6 +1901,7 @@ int NativeCanvasSession::pasteSelectionSvg(
     int* outNewWidth,
     int* outNewHeight
 ) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (outNewWidth) *outNewWidth = m_width;
     if (outNewHeight) *outNewHeight = m_height;
     if (!m_page || svgFragment.empty()) return 0;
@@ -1038,6 +1946,7 @@ int NativeCanvasSession::pasteSelectionSvg(
 }
 
 bool NativeCanvasSession::insertVerticalSpace(float yThreshold, float deltaY, bool snapToRuling, int* outNewHeight) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (outNewHeight) *outNewHeight = m_height;
     if (!m_page) return false;
 
@@ -1085,7 +1994,9 @@ bool NativeCanvasSession::insertVerticalSpace(float yThreshold, float deltaY, bo
             m_page->svgDoc->setViewBox(Rect());
         }
         m_height = targetHeight;
-        rebuildProceduralRuleLayer();
+        if (m_rulingStyle != RULING_STANDARD) {
+            rebuildProceduralRuleLayer();
+        }
     }
     m_doc->history->endAction();
     if (outNewHeight) *outNewHeight = m_height;
@@ -1093,6 +2004,7 @@ bool NativeCanvasSession::insertVerticalSpace(float yThreshold, float deltaY, bo
 }
 
 bool NativeCanvasSession::insertHorizontalSpace(float xThreshold, float deltaX, bool snapToRuling, int* outNewWidth) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (outNewWidth) *outNewWidth = m_width;
     if (!m_page) return false;
 
@@ -1140,7 +2052,9 @@ bool NativeCanvasSession::insertHorizontalSpace(float xThreshold, float deltaX, 
             m_page->svgDoc->setViewBox(Rect());
         }
         m_width = targetWidth;
-        rebuildProceduralRuleLayer();
+        if (m_rulingStyle != RULING_STANDARD) {
+            rebuildProceduralRuleLayer();
+        }
     }
     m_doc->history->endAction();
     if (outNewWidth) *outNewWidth = m_width;
@@ -1156,6 +2070,7 @@ bool NativeCanvasSession::insertRuledSpace(
     int* outNewWidth,
     int* outNewHeight
 ) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (outNewWidth) *outNewWidth = m_width;
     if (outNewHeight) *outNewHeight = m_height;
     if (!m_page) return false;
@@ -1264,7 +2179,9 @@ bool NativeCanvasSession::insertRuledSpace(
             m_page->svgDoc->setViewBox(Rect());
         }
         m_height = targetHeight;
-        rebuildProceduralRuleLayer();
+        if (m_rulingStyle != RULING_STANDARD) {
+            rebuildProceduralRuleLayer();
+        }
     }
 
     m_doc->history->endAction();
@@ -1283,6 +2200,7 @@ bool NativeCanvasSession::setPageSetup(
     int ruleColorArgb,
     int rulingStyle
 ) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_page) return false;
     m_doc->history->startAction(0);
     PageProperties props = m_page->getProperties();
@@ -1297,11 +2215,19 @@ bool NativeCanvasSession::setPageSetup(
     if (rulingStyle >= 0) {
         m_rulingStyle = rulingStyle;
     }
+    if (m_rulingStyle == RULING_STANDARD) {
+        m_page->isCustomRuling = false;
+        if (m_page->contentNode) {
+            m_page->contentNode->setAttr("rulingstyle", rulingStyleToName(m_rulingStyle));
+        }
+    }
     m_page->setProperties(&props);
     if (m_page->svgDoc) {
         m_page->svgDoc->setViewBox(Rect());
     }
-    rebuildProceduralRuleLayer();
+    if (m_rulingStyle != RULING_STANDARD) {
+        rebuildProceduralRuleLayer();
+    }
     m_doc->history->endAction();
 
     m_width = static_cast<int>(m_page->width());
@@ -1312,6 +2238,7 @@ bool NativeCanvasSession::setPageSetup(
 }
 
 bool NativeCanvasSession::lockContentAsTemplate() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_page || !m_page->contentNode || m_page->contentNode->children().empty()) {
         return false;
     }
@@ -1329,8 +2256,15 @@ bool NativeCanvasSession::lockContentAsTemplate() {
         toMove.push_back(child);
     }
     for (SvgNode* child : toMove) {
+        if (child->hasExt()) {
+            m_page->onRemoveStroke(static_cast<Element*>(child->ext()));
+        }
         m_page->contentNode->removeChild(child);
         m_page->ruleNode->addChild(child);
+    }
+    if (m_doc) {
+        delete m_doc->history;
+        m_doc->history = new UndoHistory;
     }
     m_page->contentNode->setAttr("rulingstyle", "custom");
     m_page->svgDoc->setDirty(SvgNode::PIXELS_DIRTY);
@@ -1338,6 +2272,7 @@ bool NativeCanvasSession::lockContentAsTemplate() {
 }
 
 bool NativeCanvasSession::unlockTemplateToContent() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_page || !m_page->ruleNode) return false;
     clearSelection();
 
@@ -1361,6 +2296,10 @@ bool NativeCanvasSession::unlockTemplateToContent() {
         m_page->contentNode->addChild(node, firstContent);
         m_page->onAddStroke(static_cast<Element*>(node->ext()));
     }
+    if (m_doc) {
+        delete m_doc->history;
+        m_doc->history = new UndoHistory;
+    }
 
     m_rulingStyle = RULING_STANDARD;
     m_page->isCustomRuling = false;
@@ -1370,7 +2309,12 @@ bool NativeCanvasSession::unlockTemplateToContent() {
 }
 
 bool NativeCanvasSession::clearCustomTemplate() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_page) return false;
+    if (m_doc) {
+        delete m_doc->history;
+        m_doc->history = new UndoHistory;
+    }
     m_rulingStyle = RULING_STANDARD;
     m_page->isCustomRuling = false;
     rebuildProceduralRuleLayer();
@@ -1384,6 +2328,7 @@ bool NativeCanvasSession::insertImageBytes(
     bool asBackground,
     float* outBounds4
 ) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_page || !bytes || length < 16) return false;
     Image decoded = Image::decodeBuffer(bytes, length);
     if (decoded.isNull() || decoded.getWidth() <= 0 || decoded.getHeight() <= 0) {
@@ -1406,11 +2351,22 @@ bool NativeCanvasSession::insertImageBytes(
         m_rulingStyle = RULING_CUSTOM_DESIGNER;
         m_page->contentNode->setAttr("rulingstyle", "custom");
 
-        Dim scale = std::min(pageW / imgW, pageH / imgH);
-        Dim dstW = imgW * scale;
+        // Fit to page width and anchor at top (y=0) so the background template fills the canvas
+        // rather than floating zoomed-out in the vertical middle of an oversized page.
+        Dim scale = pageW / imgW;
+        Dim dstW = pageW;
         Dim dstH = imgH * scale;
-        Dim dstX = (pageW - dstW) * 0.5f;
-        Dim dstY = (pageH - dstH) * 0.5f;
+        Dim dstX = 0.0f;
+        Dim dstY = 0.0f;
+        if (dstH > pageH) {
+            PageProperties props = m_page->getProperties();
+            props.width = pageW;
+            props.height = dstH;
+            m_page->setProperties(&props);
+            if (m_page->svgDoc) {
+                m_page->svgDoc->setViewBox(Rect());
+            }
+        }
         Rect bbox = Rect::ltwh(dstX, dstY, dstW, dstH);
 
         auto* svgImg = new SvgImage(std::move(decoded), bbox);
@@ -1458,27 +2414,33 @@ bool NativeCanvasSession::insertImageBytes(
 }
 
 bool NativeCanvasSession::hasCustomTemplateNodes() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_page || !m_page->ruleNode) return false;
     return m_page->isCustomRuling && m_page->ruleNode->children().size() > 1;
 }
 
 int NativeCanvasSession::paperColorArgb() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     return m_page ? static_cast<int>(m_page->color().argb()) : static_cast<int>(0xFFFFFDF8);
 }
 
 int NativeCanvasSession::ruleColorArgb() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     return m_page ? static_cast<int>(m_page->props.ruleColor.argb()) : static_cast<int>(0xFF4A90E2);
 }
 
 int NativeCanvasSession::marginLeft() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     return m_page ? static_cast<int>(m_page->marginLeft()) : 0;
 }
 
 int NativeCanvasSession::strokeCount() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     return m_page ? m_page->strokeCount() : 0;
 }
 
 bool NativeCanvasSession::undo() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_doc || !m_doc->history || !m_doc->history->canUndo()) return false;
     m_doc->history->undo();
     if (m_page) {
@@ -1493,6 +2455,7 @@ bool NativeCanvasSession::undo() {
 }
 
 bool NativeCanvasSession::redo() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_doc || !m_doc->history || !m_doc->history->canRedo()) return false;
     m_doc->history->redo();
     if (m_page) {
@@ -1507,10 +2470,12 @@ bool NativeCanvasSession::redo() {
 }
 
 bool NativeCanvasSession::canUndo() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     return m_doc && m_doc->history && m_doc->history->canUndo();
 }
 
 bool NativeCanvasSession::canRedo() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     return m_doc && m_doc->history && m_doc->history->canRedo();
 }
 
@@ -1531,10 +2496,19 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeCreateSession(
 }
 
 JNIEXPORT void JNICALL
+Java_com_orgwritenotes_ink_WriteNativeBridge_nativeRetainSession(
+    JNIEnv*, jobject, jlong handle
+) {
+    auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (session) session->retain();
+}
+
+JNIEXPORT void JNICALL
 Java_com_orgwritenotes_ink_WriteNativeBridge_nativeDestroySession(
     JNIEnv*, jobject, jlong handle
 ) {
-    delete reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (session) session->release();
 }
 
 JNIEXPORT jboolean JNICALL
@@ -1564,6 +2538,16 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeExportSvgz(
     return out;
 }
 
+JNIEXPORT void JNICALL
+Java_com_orgwritenotes_ink_WriteNativeBridge_nativeSetRenderTheme(
+    JNIEnv*, jobject, jlong handle, jboolean isDark, jint darkBgArgb, jint darkFgArgb
+) {
+    auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (session) {
+        session->setRenderTheme(isDark == JNI_TRUE, static_cast<uint32_t>(darkBgArgb), static_cast<uint32_t>(darkFgArgb));
+    }
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_orgwritenotes_ink_WriteNativeBridge_nativeRenderToBitmap(
     JNIEnv* env, jobject, jlong handle, jobject bitmap
@@ -1585,6 +2569,67 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeRenderToBitmap(
         reinterpret_cast<uint8_t*>(pixels),
         static_cast<int>(info.width),
         static_cast<int>(info.height)
+    );
+    AndroidBitmap_unlockPixels(env, bitmap);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_orgwritenotes_ink_WriteNativeBridge_nativeRenderTileToBitmap(
+    JNIEnv* env, jobject, jlong handle, jobject bitmap, jfloat originX, jfloat originY
+) {
+    auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!session || !bitmap) return JNI_FALSE;
+    AndroidBitmapInfo info{};
+    if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) return JNI_FALSE;
+    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return JNI_FALSE;
+    void* pixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS || !pixels) {
+        return JNI_FALSE;
+    }
+    bool ok = session->renderToPixels(
+        reinterpret_cast<uint8_t*>(pixels),
+        static_cast<int>(info.width),
+        static_cast<int>(info.height),
+        originX,
+        originY
+    );
+    AndroidBitmap_unlockPixels(env, bitmap);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_orgwritenotes_ink_WriteNativeBridge_nativeRenderDirtyRectToBitmap(
+    JNIEnv* env,
+    jobject,
+    jlong handle,
+    jobject bitmap,
+    jfloat left,
+    jfloat top,
+    jfloat right,
+    jfloat bottom
+) {
+    auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!session || !bitmap) return JNI_FALSE;
+    AndroidBitmapInfo info{};
+    if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) {
+        return JNI_FALSE;
+    }
+    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
+        return JNI_FALSE;
+    }
+    void* pixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS || !pixels) {
+        return JNI_FALSE;
+    }
+    bool ok = session->renderDirtyRectToPixels(
+        reinterpret_cast<uint8_t*>(pixels),
+        static_cast<int>(info.width),
+        static_cast<int>(info.height),
+        left,
+        top,
+        right,
+        bottom
     );
     AndroidBitmap_unlockPixels(env, bitmap);
     return ok ? JNI_TRUE : JNI_FALSE;
@@ -1633,6 +2678,27 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeMoveStroke(
     if (session) session->moveStroke(x, y, pressure, tiltX, tiltY, timestampMs);
 }
 
+JNIEXPORT void JNICALL
+Java_com_orgwritenotes_ink_WriteNativeBridge_nativeMoveStrokeBatch(
+    JNIEnv* env, jobject, jlong handle, jfloatArray pointsData6, jint pointCount
+) {
+    auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!session || !pointsData6 || pointCount <= 0) return;
+    const jsize totalFloats = pointCount * 6;
+    if (env->GetArrayLength(pointsData6) < totalFloats) return;
+
+    constexpr int STACK_MAX_POINTS = 64;
+    if (pointCount <= STACK_MAX_POINTS) {
+        jfloat stackBuf[STACK_MAX_POINTS * 6];
+        env->GetFloatArrayRegion(pointsData6, 0, totalFloats, stackBuf);
+        session->moveStrokeBatch(stackBuf, pointCount);
+    } else {
+        std::vector<jfloat> heapBuf(static_cast<size_t>(totalFloats));
+        env->GetFloatArrayRegion(pointsData6, 0, totalFloats, heapBuf.data());
+        session->moveStrokeBatch(heapBuf.data(), pointCount);
+    }
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_orgwritenotes_ink_WriteNativeBridge_nativeEndStroke(
     JNIEnv* env, jobject, jlong handle, jintArray outNewDimensions
@@ -1641,10 +2707,24 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeEndStroke(
     if (!session) return env->NewStringUTF("");
     bool expanded = false;
     int newHeight = session->height();
-    std::string pathXml = session->endStroke(&expanded, &newHeight);
-    if (outNewDimensions && env->GetArrayLength(outNewDimensions) >= 2) {
-        jint dims[2] = { session->width(), newHeight };
-        env->SetIntArrayRegion(outNewDimensions, 0, 2, dims);
+    float dirtyBounds[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    std::string pathXml = session->endStroke(&expanded, &newHeight, dirtyBounds);
+    if (outNewDimensions) {
+        const jsize len = env->GetArrayLength(outNewDimensions);
+        if (len >= 6) {
+            jint dimsAndDirty[6] = {
+                session->width(),
+                newHeight,
+                static_cast<jint>(std::floor(dirtyBounds[0])),
+                static_cast<jint>(std::floor(dirtyBounds[1])),
+                static_cast<jint>(std::ceil(dirtyBounds[2])),
+                static_cast<jint>(std::ceil(dirtyBounds[3]))
+            };
+            env->SetIntArrayRegion(outNewDimensions, 0, 6, dimsAndDirty);
+        } else if (len >= 2) {
+            jint dims[2] = { session->width(), newHeight };
+            env->SetIntArrayRegion(outNewDimensions, 0, 2, dims);
+        }
     }
     return env->NewStringUTF(pathXml.c_str());
 }
@@ -1671,6 +2751,36 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeEraseFreeSegment(
 ) {
     auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
     return (session && session->eraseFreeSegment(prevX, prevY, x, y, radius)) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_orgwritenotes_ink_WriteNativeBridge_nativeEraseSegmentDirty(
+    JNIEnv* env,
+    jobject,
+    jlong handle,
+    jfloat prevX,
+    jfloat prevY,
+    jfloat x,
+    jfloat y,
+    jfloat radius,
+    jint eraseMode,
+    jfloatArray outDirty4
+) {
+    auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!session) return JNI_FALSE;
+    float dirty[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    bool erased = false;
+    if (eraseMode == 1) {
+        erased = session->eraseRuledLineAt(y, dirty);
+    } else if (eraseMode == 2) {
+        erased = session->eraseFreeSegment(prevX, prevY, x, y, radius, dirty);
+    } else {
+        erased = session->eraseSegment(prevX, prevY, x, y, radius, dirty);
+    }
+    if (erased && outDirty4 && env->GetArrayLength(outDirty4) >= 4) {
+        env->SetFloatArrayRegion(outDirty4, 0, 4, dirty);
+    }
+    return erased ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jint JNICALL
@@ -1826,14 +2936,26 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeDeleteSelection(
 
 JNIEXPORT jint JNICALL
 Java_com_orgwritenotes_ink_WriteNativeBridge_nativeDuplicateSelection(
-    JNIEnv* env, jobject, jlong handle, jfloat offsetX, jfloat offsetY, jfloatArray outBounds4
+    JNIEnv* env,
+    jobject,
+    jlong handle,
+    jfloat offsetX,
+    jfloat offsetY,
+    jfloatArray outBounds4,
+    jintArray outNewDimensions
 ) {
     auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
     if (!session) return 0;
     float bounds[4] = {0, 0, 0, 0};
-    int count = session->duplicateSelection(offsetX, offsetY, bounds);
+    int newW = session->width();
+    int newH = session->height();
+    int count = session->duplicateSelection(offsetX, offsetY, bounds, &newW, &newH);
     if (outBounds4 && env->GetArrayLength(outBounds4) >= 4) {
         env->SetFloatArrayRegion(outBounds4, 0, 4, bounds);
+    }
+    if (outNewDimensions && env->GetArrayLength(outNewDimensions) >= 2) {
+        jint dims[2] = { newW, newH };
+        env->SetIntArrayRegion(outNewDimensions, 0, 2, dims);
     }
     return count;
 }
@@ -2083,6 +3205,49 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeResizeCanvas(
 ) {
     auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
     return (session && session->resizeCanvas(newWidth, newHeight)) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_orgwritenotes_ink_WriteNativeBridge_nativeSnapActiveStrokeToShape(
+    JNIEnv* env, jobject, jlong handle, jfloatArray outSnappedPoints, jintArray outNumPoints1
+) {
+    auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!session) return 0;
+    float localPts[256] = {0};
+    int numPts = 0;
+    int shapeType = session->snapActiveStrokeToShape(localPts, 256, &numPts);
+    if (shapeType > 0 && outSnappedPoints && numPts > 0) {
+        jsize maxFloats = std::min<jsize>(env->GetArrayLength(outSnappedPoints), numPts * 2);
+        env->SetFloatArrayRegion(outSnappedPoints, 0, maxFloats, localPts);
+    }
+    if (outNumPoints1 && env->GetArrayLength(outNumPoints1) >= 1) {
+        jint n = numPts;
+        env->SetIntArrayRegion(outNumPoints1, 0, 1, &n);
+    }
+    return shapeType;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_orgwritenotes_ink_WriteNativeBridge_nativeTrimWhitespace(
+    JNIEnv* env, jobject, jlong handle, jint paddingPx, jintArray outNewDimensions
+) {
+    auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!session) return JNI_FALSE;
+    int newHeight = session->height();
+    bool ok = session->trimBottomWhitespace(paddingPx, &newHeight);
+    if (outNewDimensions && env->GetArrayLength(outNewDimensions) >= 2) {
+        jint dims[2] = { session->width(), newHeight };
+        env->SetIntArrayRegion(outNewDimensions, 0, 2, dims);
+    }
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_orgwritenotes_ink_WriteNativeBridge_nativeSetTemplateImageOpacity(
+    JNIEnv*, jobject, jlong handle, jfloat opacity
+) {
+    auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return (session && session->setTemplateImageOpacity(opacity)) ? JNI_TRUE : JNI_FALSE;
 }
 
 } // extern "C"

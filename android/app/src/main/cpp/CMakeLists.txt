@@ -59,6 +59,16 @@ add_library(
     ${WRITE_CORE_SOURCES}
 )
 
+target_compile_options(
+    orgwritenotes_jni
+    PRIVATE
+    -O3
+    -DNDEBUG
+    -ffast-math
+    -fno-math-errno
+    -funroll-loops
+)
+
 if(ANDROID)
     find_library(log-lib log)
     find_library(android-lib android)

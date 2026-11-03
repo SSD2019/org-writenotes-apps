@@ -1,5 +1,6 @@
 package com.orgwritenotes.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -32,6 +33,7 @@ import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -195,12 +197,18 @@ enum class WriteIconAsset(
 fun WriteSvgIcon(
     asset: WriteIconAsset,
     tint: Color = Color(0xFFF1F5F9),
-    size: Dp = 20.dp
+    size: Dp = 20.dp,
+    contentDescription: String? = null
 ) {
     val parsedPaths = remember(asset) {
         asset.pathData.map { d -> PathParser().parsePathString(d).toPath() }
     }
-    Canvas(modifier = Modifier.size(size)) {
+    val a11y = if (contentDescription != null) {
+        Modifier.semantics { this.contentDescription = contentDescription }
+    } else {
+        Modifier.clearAndSetSemantics { }
+    }
+    Canvas(modifier = Modifier.size(size).then(a11y)) {
         val sx = this.size.width / asset.viewBoxW
         val sy = this.size.height / asset.viewBoxH
         withTransform({
@@ -261,6 +269,71 @@ private data class SavedWritePenPreset(
     val tip: WritePenTip,
     val isHighlighter: Boolean = false
 )
+
+private object WritePenPresetStorage {
+    private const val PREFS_NAME = "org_writenotes_prefs"
+    private const val KEY_CUSTOM_PENS = "custom_pen_presets_v1"
+
+    fun loadCustomPens(context: android.content.Context): List<SavedWritePenPreset> {
+        return runCatching {
+            val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            val raw = prefs.getString(KEY_CUSTOM_PENS, null) ?: return emptyList()
+            val arr = org.json.JSONArray(raw)
+            val list = mutableListOf<SavedWritePenPreset>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                list.add(
+                    SavedWritePenPreset(
+                        name = obj.optString("name", "Custom Pen"),
+                        colorArgb = obj.optInt("colorArgb", 0xFF1E293B.toInt()),
+                        widthPx = obj.optDouble("widthPx", 2.6).toFloat(),
+                        tip = WritePenTip.values().firstOrNull { it.nativeCode == obj.optInt("tip", 1) } ?: WritePenTip.ROUND,
+                        isHighlighter = obj.optBoolean("isHighlighter", false)
+                    )
+                )
+            }
+            list
+        }.getOrDefault(emptyList())
+    }
+
+    fun saveCustomPens(context: android.content.Context, pens: List<SavedWritePenPreset>) {
+        runCatching {
+            val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            val arr = org.json.JSONArray()
+            for (p in pens) {
+                arr.put(
+                    org.json.JSONObject().apply {
+                        put("name", p.name)
+                        put("colorArgb", p.colorArgb)
+                        put("widthPx", p.widthPx.toDouble())
+                        put("tip", p.tip.nativeCode)
+                        put("isHighlighter", p.isHighlighter)
+                    }
+                )
+            }
+            prefs.edit().putString(KEY_CUSTOM_PENS, arr.toString()).apply()
+        }
+    }
+
+    // B3: Persisted per-sketch viewport (zoom + pan offset)
+    fun loadViewport(context: android.content.Context, fileName: String): Triple<Float, Float, Float>? {
+        return runCatching {
+            val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            val raw = prefs.getString("viewport_$fileName", null) ?: return null
+            val parts = raw.split(",")
+            if (parts.size == 3) {
+                Triple(parts[0].toFloat(), parts[1].toFloat(), parts[2].toFloat())
+            } else null
+        }.getOrNull()
+    }
+
+    fun saveViewport(context: android.content.Context, fileName: String, zoomScale: Float, panX: Float, panY: Float) {
+        runCatching {
+            val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            prefs.edit().putString("viewport_$fileName", "$zoomScale,$panX,$panY").apply()
+        }
+    }
+}
 
 // Exact width progression from Stylus Labs Write `PenToolbar::PEN_WIDTHS`
 private val WRITE_PEN_WIDTH_PALETTE = listOf(1.0f, 1.6f, 2.4f, 3.2f, 4.5f, 6.5f, 12.0f)
@@ -334,6 +407,7 @@ fun WriteSharedToolbarChrome(
     onRedo: () -> Unit,
     onExpandDown: () -> Unit,
     onExpandRight: () -> Unit,
+    onTrimWhitespace: (() -> Unit)? = null,
     onOpenPageSetup: () -> Unit,
     onDeleteImage: (() -> Unit)? = null,
     pressureEnabled: Boolean = true,
@@ -342,12 +416,15 @@ fun WriteSharedToolbarChrome(
     onChangeChiselAngle: ((Float) -> Unit)? = null,
     onInsertImage: (() -> Unit)? = null,
     onDeleteSelection: (() -> Unit)? = null,
+    isDarkCanvasTheme: Boolean = false,
+    onToggleDarkCanvasTheme: (() -> Unit)? = null,
     onUserInteracted: () -> Unit = {}
 ) {
+    val context = LocalContext.current
     var showEraseMenu by remember { mutableStateOf(false) }
     var showSelectMenu by remember { mutableStateOf(false) }
     var showInsertSpaceMenu by remember { mutableStateOf(false) }
-    var customPens by remember { mutableStateOf(listOf<SavedWritePenPreset>()) }
+    var customPens by remember { mutableStateOf(WritePenPresetStorage.loadCustomPens(context)) }
 
     Column(
         modifier = Modifier
@@ -801,9 +878,39 @@ fun WriteSharedToolbarChrome(
                 }
             )
 
+            // Ephemeral Laser Pointer Tool
+            val isLaserActive = activeMode == StylusToolMode.LASER
+            Text(
+                text = "🔴 Laser",
+                color = if (isLaserActive) Color.White else Color(0xFFFCA5A5),
+                fontSize = 11.sp,
+                fontWeight = if (isLaserActive) FontWeight.Bold else FontWeight.SemiBold,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(if (isLaserActive) Color(0xFFDC2626) else Color(0xFF2E2E2E))
+                    .border(
+                        1.dp,
+                        if (isLaserActive) Color(0xFFF87171) else Color(0xFF3F3F46),
+                        RoundedCornerShape(6.dp)
+                    )
+                    .clickable {
+                        onUserInteracted()
+                        onSelectToolMode(
+                            if (isLaserActive) StylusToolMode.PEN else StylusToolMode.LASER,
+                            selectedColor,
+                            selectedWidth,
+                            selectedPenTip,
+                            null,
+                            null,
+                            null
+                        )
+                    }
+                    .padding(horizontal = 8.dp, vertical = 6.dp)
+            )
+
             Spacer(modifier = Modifier.weight(1f))
 
-            // Expand Down & Expand Right (`actionExpand_Down`, `actionExpand_Right`)
+            // Expand Down, Expand Right & Trim Fit
             WriteMainToolButton(
                 icon = WriteIconAsset.EXPAND_DOWN,
                 label = "+Down",
@@ -824,6 +931,23 @@ fun WriteSharedToolbarChrome(
                     onExpandRight()
                 }
             )
+            if (onTrimWhitespace != null) {
+                Text(
+                    text = "✂ Trim Fit",
+                    color = Color(0xFFE2E8F0),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color(0xFF2E2E2E))
+                        .border(1.dp, Color(0xFF3F3F46), RoundedCornerShape(6.dp))
+                        .clickable {
+                            onUserInteracted()
+                            onTrimWhitespace()
+                        }
+                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                )
+            }
 
             // Page, Template & Custom Designer Setup (`actionPage_Setup`)
             WriteMainToolButton(
@@ -847,6 +971,28 @@ fun WriteSharedToolbarChrome(
                         onUserInteracted()
                         onInsertImage()
                     }
+                )
+            }
+
+            if (onToggleDarkCanvasTheme != null) {
+                Text(
+                    text = if (isDarkCanvasTheme) "☾ Dark" else "☀ Light",
+                    color = if (isDarkCanvasTheme) Color(0xFF38BDF8) else Color(0xFFFDE047),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color(0xFF2E2E2E))
+                        .border(
+                            1.dp,
+                            if (isDarkCanvasTheme) Color(0xFF38BDF8).copy(alpha = 0.6f) else Color(0xFF3F3F46),
+                            RoundedCornerShape(6.dp)
+                        )
+                        .clickable {
+                            onUserInteracted()
+                            onToggleDarkCanvasTheme()
+                        }
+                        .padding(horizontal = 8.dp, vertical = 6.dp)
                 )
             }
 
@@ -933,8 +1079,9 @@ fun WriteSharedToolbarChrome(
                     .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 12.dp, vertical = 6.dp)
             ) {
-                // Saved Pen Presets + User Custom Saved Pens
-                (WRITE_SAVED_PENS + customPens).forEach { preset ->
+                // Saved Pen Presets + User Custom Saved Pens (persisted in SharedPreferences)
+                (WRITE_SAVED_PENS + customPens).forEachIndexed { idx, preset ->
+                    val isCustomPreset = idx >= WRITE_SAVED_PENS.size
                     val isPresetActive = (
                         (preset.isHighlighter && activeMode == StylusToolMode.HIGHLIGHTER) ||
                             (!preset.isHighlighter && activeMode == StylusToolMode.PEN &&
@@ -966,11 +1113,16 @@ fun WriteSharedToolbarChrome(
                             }
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     ) {
+                        val displayDotColor = if (isDarkCanvasTheme && !preset.isHighlighter && preset.colorArgb == 0xFF1E293B.toInt()) {
+                            Color(0xFFF8FAFC)
+                        } else {
+                            Color(preset.colorArgb)
+                        }
                         Box(
                             modifier = Modifier
                                 .size(10.dp)
                                 .clip(CircleShape)
-                                .background(Color(preset.colorArgb))
+                                .background(displayDotColor)
                         )
                         Spacer(modifier = Modifier.width(5.dp))
                         Text(
@@ -979,6 +1131,22 @@ fun WriteSharedToolbarChrome(
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Medium
                         )
+                        if (isCustomPreset) {
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text(
+                                text = "×",
+                                color = Color(0xFF94A3B8),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.clickable {
+                                    onUserInteracted()
+                                    val customIdx = idx - WRITE_SAVED_PENS.size
+                                    val updated = customPens.filterIndexed { i, _ -> i != customIdx }
+                                    customPens = updated
+                                    WritePenPresetStorage.saveCustomPens(context, updated)
+                                }
+                            )
+                        }
                     }
                 }
 
@@ -995,13 +1163,15 @@ fun WriteSharedToolbarChrome(
                         .clickable {
                             onUserInteracted()
                             val newName = "Pen ${customPens.size + 1} (${selectedWidth}px)"
-                            customPens = customPens + SavedWritePenPreset(
+                            val updated = customPens + SavedWritePenPreset(
                                 name = newName,
                                 colorArgb = selectedColor,
                                 widthPx = selectedWidth,
                                 tip = selectedPenTip,
                                 isHighlighter = activeMode == StylusToolMode.HIGHLIGHTER
                             )
+                            customPens = updated
+                            WritePenPresetStorage.saveCustomPens(context, updated)
                         }
                         .padding(horizontal = 7.dp, vertical = 4.dp)
                 )
@@ -1015,11 +1185,16 @@ fun WriteSharedToolbarChrome(
                 ) {
                     WRITE_COLOR_PALETTE.forEach { argb ->
                         val isSelected = selectedColor == argb
+                        val swatchColor = if (isDarkCanvasTheme && argb == 0xFF1E293B.toInt()) {
+                            Color(0xFFF8FAFC)
+                        } else {
+                            Color(argb)
+                        }
                         Box(
                             modifier = Modifier
                                 .size(if (isSelected) 24.dp else 20.dp)
                                 .clip(RoundedCornerShape(4.dp))
-                                .background(Color(argb))
+                                .background(swatchColor)
                                 .border(
                                     width = if (isSelected) 2.dp else 1.dp,
                                     color = if (isSelected) Color(0xFF38BDF8) else Color(0xFF64748B),
@@ -1259,6 +1434,7 @@ fun WriteSelectionPopupBar(
     onScaleLarger: (() -> Unit)? = null,
     onRotateCcw: (() -> Unit)? = null,
     onRotateCw: (() -> Unit)? = null,
+    onConvertToText: (() -> Unit)? = null,
     onApplyStyle: () -> Unit,
     onDelete: () -> Unit,
     onClearSelection: () -> Unit,
@@ -1282,6 +1458,21 @@ fun WriteSelectionPopupBar(
         )
 
         WriteToolbarDivider()
+
+        if (onConvertToText != null) {
+            Text(
+                text = "✨ Convert to Text",
+                color = Color(0xFFFDE047),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0xFF1E3A8A))
+                    .border(1.dp, Color(0xFF38BDF8), RoundedCornerShape(6.dp))
+                    .clickable { onConvertToText() }
+                    .padding(horizontal = 8.dp, vertical = 5.dp)
+            )
+        }
 
         if (onCopy != null) {
             SelectionActionPill("Copy", onClick = onCopy)
@@ -1385,9 +1576,16 @@ fun WriteZoomedEditorOverlay(
     nodeId: String,
     block: OrgBlock.InkCanvasBlock,
     syncClient: EmacsSyncClient,
+    sourceInlineView: WriteCanvasBlockView? = null,
     onCloseZoom: (updatedWidth: Int, updatedHeight: Int) -> Unit
 ) {
     var canvasViewRef by remember(block.blockId) { mutableStateOf<WriteCanvasBlockView?>(null) }
+    val emacsTheme by syncClient.emacsTheme.collectAsState()
+    val bgArgb = remember(emacsTheme) { emacsTheme.resolvedDarkBgArgb() }
+    val fgArgb = remember(emacsTheme) { emacsTheme.resolvedDarkFgArgb() }
+    LaunchedEffect(emacsTheme, canvasViewRef) {
+        canvasViewRef?.setAdaptiveTheme(emacsTheme.isDark, bgArgb, fgArgb)
+    }
 
     var activeMode by remember(block.blockId) { mutableStateOf(StylusToolMode.PEN) }
     var lastEraserMode by remember(block.blockId) { mutableStateOf(StylusToolMode.ERASER) }
@@ -1406,6 +1604,9 @@ fun WriteZoomedEditorOverlay(
 
     var showPageSetupDialog by remember { mutableStateOf(false) }
     var showDeleteConfirmDialog by remember(block.blockId) { mutableStateOf(false) }
+    var showOcrDialog by remember { mutableStateOf(false) }
+    var ocrDraftText by remember { mutableStateOf("") }
+    var splitTarget by remember(block.blockId) { mutableStateOf<SplitTarget?>(null) }
 
     var selectionState by remember { mutableStateOf(WriteSelectionState()) }
     var zoomScale by remember { mutableStateOf(1.0f) }
@@ -1436,6 +1637,18 @@ fun WriteZoomedEditorOverlay(
                 }
             } catch (_: Exception) {}
         }
+    }
+
+    val closeZoomWithAdopt: () -> Unit = {
+        val zoomedView = canvasViewRef
+        if (sourceInlineView != null && zoomedView != null) {
+            sourceInlineView.adoptSessionAndBitmapFrom(zoomedView, transferBitmapOwnership = true)
+        }
+        onCloseZoom(pageSetup.width, pageSetup.height)
+    }
+
+    BackHandler {
+        closeZoomWithAdopt()
     }
 
     Column(
@@ -1523,7 +1736,9 @@ fun WriteZoomedEditorOverlay(
             onPasteClipboard = {
                 canvasViewRef?.pasteClipboardStrokes()
             },
-            onZoomOrCloseFullScreen = { onCloseZoom(pageSetup.width, pageSetup.height) },
+            onZoomOrCloseFullScreen = {
+                closeZoomWithAdopt()
+            },
             onSelectToolMode = { newMode, newColor, newWidth, newTip, eraseDef, selectDef, insDef ->
                 activeMode = newMode
                 selectedColor = newColor
@@ -1550,8 +1765,11 @@ fun WriteZoomedEditorOverlay(
             onRedo = { canvasViewRef?.performRedo() },
             onExpandDown = { canvasViewRef?.expandDown() },
             onExpandRight = { canvasViewRef?.expandRight() },
+            onTrimWhitespace = { canvasViewRef?.trimWhitespace() },
             onOpenPageSetup = { showPageSetupDialog = true },
-            onDeleteImage = { showDeleteConfirmDialog = true }
+            onDeleteImage = { showDeleteConfirmDialog = true },
+            isDarkCanvasTheme = emacsTheme.isDark,
+            onToggleDarkCanvasTheme = { syncClient.toggleCanvasDarkMode() }
         )
 
         Box(
@@ -1568,7 +1786,9 @@ fun WriteZoomedEditorOverlay(
                         xRuling = block.xRuling,
                         yRuling = block.yRuling,
                         isZoomedMode = true,
+                        adoptFromView = sourceInlineView,
                         onStrokeCommitted = { pathXml, w, h, exportSvgzBase64 ->
+                            com.orgwritenotes.ink.AudioSketchRecorder.noteStroke(block.fileName)
                             syncClient.streamStrokeAndScheduleCommit(
                                 nodeId = nodeId,
                                 fileName = block.fileName,
@@ -1589,10 +1809,38 @@ fun WriteZoomedEditorOverlay(
                             canUndo = undoAvail
                             canRedo = redoAvail
                             pageSetup = setup
+                            canvasViewRef?.let { cv ->
+                                WritePenPresetStorage.saveViewport(context, block.fileName, cv.zoomScale, cv.panOffsetX, cv.panOffsetY)
+                            }
+                        },
+                        onFlushPendingChanges = { w, h, b64 ->
+                            syncClient.flushPendingInkCommit(
+                                nodeId = nodeId,
+                                fileName = block.fileName,
+                                canvasWidth = w,
+                                canvasHeight = h,
+                                svgzBase64 = b64
+                            )
+                        },
+                        onLaserPoint = { lx, ly ->
+                            syncClient.sendLaserPoint(nodeId, block.fileName, lx, ly)
                         }
                     ).apply {
                         singleTouchPanInZoomedMode = singleTouchPan
-                        loadFromBase64Svgz(block.svgzBase64)
+                        setAdaptiveTheme(emacsTheme.isDark, bgArgb, fgArgb)
+                        if (sourceInlineView == null) {
+                            loadFromBase64Svgz(block.svgzBase64)
+                        } else {
+                            canUndo = canUndoNow()
+                            canRedo = canRedoNow()
+                            pageSetup = queryPageSetupState()
+                        }
+                        WritePenPresetStorage.loadViewport(context, block.fileName)?.let { (savedScale, savedPanX, savedPanY) ->
+                            zoomScale = savedScale
+                            panOffsetX = savedPanX
+                            panOffsetY = savedPanY
+                            invalidate()
+                        }
                         configureTool(
                             activeMode,
                             selectedColor,
@@ -1606,7 +1854,37 @@ fun WriteZoomedEditorOverlay(
                         canvasViewRef = this
                     }
                 },
+                update = { view ->
+                    view.setAdaptiveTheme(emacsTheme.isDark, bgArgb, fgArgb)
+                },
                 modifier = Modifier.fillMaxSize()
+            )
+
+            splitTarget?.let { target ->
+                WriteSplitPane(
+                    nodeId = nodeId,
+                    currentFileName = block.fileName,
+                    target = target,
+                    onTargetChange = { splitTarget = it },
+                    onClose = { splitTarget = null },
+                    syncClient = syncClient,
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxHeight()
+                        .fillMaxWidth(0.45f)
+                )
+            }
+
+            WriteExtrasBar(
+                canvas = canvasViewRef,
+                nodeId = nodeId,
+                fileName = block.fileName,
+                syncClient = syncClient,
+                splitActive = splitTarget != null,
+                onToggleSplit = { splitTarget = if (splitTarget == null) SplitTarget.Text else null },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(12.dp)
             )
 
             if (selectionState.hasSelection) {
@@ -1622,6 +1900,10 @@ fun WriteZoomedEditorOverlay(
                     onRotateCcw = { canvasViewRef?.rotateSelectedStrokes(-15f) },
                     onRotateCw = { canvasViewRef?.rotateSelectedStrokes(15f) },
                     onApplyStyle = { canvasViewRef?.applyCurrentStyleToSelection() },
+                    onConvertToText = {
+                        ocrDraftText = canvasViewRef?.recognizeSelectionOcr().orEmpty()
+                        showOcrDialog = true
+                    },
                     onDelete = { canvasViewRef?.deleteSelectedStrokes() },
                     onClearSelection = { canvasViewRef?.clearSelection() },
                     modifier = Modifier
@@ -1653,6 +1935,7 @@ fun WriteZoomedEditorOverlay(
                 StatusbarMiniPill(label = "−") { canvasViewRef?.zoomBy(0.8f) }
                 StatusbarMiniPill(label = "100%") { canvasViewRef?.resetZoom100() }
                 StatusbarMiniPill(label = "Fit Width") { canvasViewRef?.zoomFitWidth() }
+                StatusbarMiniPill(label = "Fit Page") { canvasViewRef?.zoomFitPage() }
                 StatusbarMiniPill(label = "+") { canvasViewRef?.zoomBy(1.25f) }
 
                 WriteToolbarDivider()
@@ -1663,6 +1946,55 @@ fun WriteZoomedEditorOverlay(
                 ) {
                     singleTouchPan = !singleTouchPan
                     canvasViewRef?.singleTouchPanInZoomedMode = singleTouchPan
+                }
+
+                // B2: Minimap viewport indicator toggle
+                var showMinimap by remember { mutableStateOf(false) }
+                StatusbarMiniPill(
+                    label = if (showMinimap) "Map: On" else "Map",
+                    highlighted = showMinimap
+                ) {
+                    showMinimap = !showMinimap
+                }
+            }
+
+            // B2: Canvas Minimap / Viewport navigator
+            canvasViewRef?.let { cv ->
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(12.dp)
+                        .size(width = 110.dp, height = 75.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xCC0F172A))
+                        .border(1.dp, Color(0xFF38BDF8), RoundedCornerShape(8.dp))
+                ) {
+                    val mapAspect = (pageSetup.width.toFloat() / pageSetup.height.coerceAtLeast(100).toFloat()).coerceIn(0.5f, 2.5f)
+                    val vpLeftNorm = (-cv.panOffsetX / (pageSetup.width * cv.zoomScale)).coerceIn(0f, 1f)
+                    val vpTopNorm = (-cv.panOffsetY / (pageSetup.height * cv.zoomScale)).coerceIn(0f, 1f)
+                    val vpWNorm = (1f / cv.zoomScale.coerceAtLeast(0.1f)).coerceIn(0.1f, 1f)
+                    val vpHNorm = (1f / cv.zoomScale.coerceAtLeast(0.1f)).coerceIn(0.1f, 1f)
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(4.dp)
+                    ) {
+                        // Canvas outline
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .border(0.5.dp, Color(0x6694A3B8), RoundedCornerShape(4.dp))
+                        )
+                        // Viewport window box in minimap
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(vpWNorm)
+                                .fillMaxHeight(vpHNorm)
+                                .border(1.dp, Color(0xFF38BDF8), RoundedCornerShape(2.dp))
+                                .background(Color(0x3338BDF8))
+                        )
+                    }
                 }
             }
         }
@@ -1700,7 +2032,94 @@ fun WriteZoomedEditorOverlay(
             onInsertImage = { bytes, asBackground ->
                 canvasViewRef?.insertImageBytes(bytes, asBackground = asBackground)
                 pageSetup = canvasViewRef?.queryPageSetupState() ?: pageSetup
+            },
+            onSetTemplateOpacity = { op ->
+                canvasViewRef?.setTemplateImageOpacity(op)
             }
+        )
+    }
+
+    if (showOcrDialog) {
+        AlertDialog(
+            onDismissRequest = { showOcrDialog = false },
+            title = {
+                Text(
+                    text = "Handwriting OCR — Convert Selection to Org Text",
+                    color = Color(0xFFF1F5F9),
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Review or edit the recognized text before inserting into your Org node:",
+                        color = Color(0xFF94A3B8),
+                        fontSize = 12.sp
+                    )
+                    OutlinedTextField(
+                        value = ocrDraftText,
+                        onValueChange = { ocrDraftText = it },
+                        label = { Text("Recognized Text") },
+                        minLines = 3,
+                        maxLines = 6,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    // E3: drawn "[ ]" -> checklist item; plain-text maths -> LaTeX
+                    val drawnCheckbox = com.orgwritenotes.ink.OcrSmartInsert.parseCheckbox(ocrDraftText)
+                    if (drawnCheckbox != null) {
+                        OutlinedButton(
+                            onClick = {
+                                syncClient.insertOcrText(nodeId, drawnCheckbox.text, "checklist", block.fileName)
+                                showOcrDialog = false
+                            }
+                        ) {
+                            Text("Checkbox detected: add \"${drawnCheckbox.text}\" as checklist item", fontSize = 12.sp)
+                        }
+                    } else if (com.orgwritenotes.ink.OcrSmartInsert.looksLikeMath(ocrDraftText)) {
+                        val latex = com.orgwritenotes.ink.OcrSmartInsert.toLatexParagraph(ocrDraftText)
+                        OutlinedButton(
+                            onClick = {
+                                syncClient.insertOcrText(nodeId, latex, "paragraph", block.fileName)
+                                showOcrDialog = false
+                            }
+                        ) {
+                            Text("Math detected: insert $latex", fontSize = 12.sp)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            if (ocrDraftText.isNotBlank()) {
+                                syncClient.insertOcrText(nodeId, ocrDraftText.trim(), "checklist", block.fileName)
+                            }
+                            showOcrDialog = false
+                        }
+                    ) {
+                        Text("Insert as Checklist", fontSize = 12.sp)
+                    }
+                    Button(
+                        onClick = {
+                            if (ocrDraftText.isNotBlank()) {
+                                syncClient.insertOcrText(nodeId, ocrDraftText.trim(), "paragraph", block.fileName)
+                            }
+                            showOcrDialog = false
+                        }
+                    ) {
+                        Text("Insert as Paragraph", fontSize = 12.sp)
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showOcrDialog = false }) {
+                    Text("Cancel", color = Color(0xFF94A3B8))
+                }
+            },
+            containerColor = Color(0xFF1E293B),
+            shape = RoundedCornerShape(12.dp)
         )
     }
 
@@ -1725,7 +2144,7 @@ fun WriteZoomedEditorOverlay(
                 Button(
                     onClick = {
                         showDeleteConfirmDialog = false
-                        syncClient.deleteInkBlock(nodeId, block.fileName)
+                        syncClient.deleteInkBlock(nodeId, block.fileName, block.linkText)
                         onCloseZoom(pageSetup.width, pageSetup.height)
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626))
@@ -1893,7 +2312,8 @@ fun WritePageSetupModal(
     onLockContentAsTemplate: (() -> Unit)? = null,
     onUnlockTemplateToContent: (() -> Unit)? = null,
     onClearCustomTemplate: (() -> Unit)? = null,
-    onInsertImage: ((imageBytes: ByteArray, asBackgroundTemplate: Boolean) -> Unit)? = null
+    onInsertImage: ((imageBytes: ByteArray, asBackgroundTemplate: Boolean) -> Unit)? = null,
+    onSetTemplateOpacity: ((Float) -> Unit)? = null
 ) {
     var width by remember { mutableStateOf(currentSetup.width) }
     var height by remember { mutableStateOf(currentSetup.height) }
@@ -1914,6 +2334,12 @@ fun WritePageSetupModal(
                 context.contentResolver.openInputStream(uri)?.use { stream ->
                     val bytes = stream.readBytes()
                     if (bytes.isNotEmpty()) {
+                        val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                        if (pendingImageAsBackground && opts.outWidth > 0 && opts.outHeight > 0) {
+                            width = opts.outWidth.coerceIn(800, 4800)
+                            height = opts.outHeight.coerceIn(600, 8000)
+                        }
                         onInsertImage(bytes, pendingImageAsBackground)
                         if (pendingImageAsBackground) {
                             rulingStyle = WriteTemplateStyle.CUSTOM_DESIGNER
@@ -1946,9 +2372,13 @@ fun WritePageSetupModal(
         Triple("Current (${currentSetup.width}×${currentSetup.height})", currentSetup.width, currentSetup.height),
         Triple("Inline Card (1200×600)", 1200, 600),
         Triple("Letter (1224×1584)", 1224, 1584),
+        Triple("Letter 2× High-Res (2448×3168)", 2448, 3168),
         Triple("Letter Landscape (1584×1224)", 1584, 1224),
         Triple("A4 (1190×1684)", 1190, 1684),
-        Triple("A4 Landscape (1684×1190)", 1684, 1190)
+        Triple("A4 2× High-Res (2380×3368)", 2380, 3368),
+        Triple("A4 Landscape (1684×1190)", 1684, 1190),
+        Triple("Tablet High-Res (2560×1600)", 2560, 1600),
+        Triple("Tablet Portrait (1600×2560)", 1600, 2560)
     )
 
     AlertDialog(
@@ -2046,6 +2476,16 @@ fun WritePageSetupModal(
                         }
                     )
                     TemplateChip(
+                        label = "Weekly Planner",
+                        selected = rulingStyle == WriteTemplateStyle.WEEKLY_PLANNER,
+                        onClick = {
+                            rulingStyle = WriteTemplateStyle.WEEKLY_PLANNER
+                            xRuling = 0
+                            if (yRuling <= 0) yRuling = 32
+                            marginLeft = 150
+                        }
+                    )
+                    TemplateChip(
                         label = "Custom Designer",
                         selected = rulingStyle == WriteTemplateStyle.CUSTOM_DESIGNER,
                         onClick = {
@@ -2123,6 +2563,28 @@ fun WritePageSetupModal(
                             }
                         }
                     }
+                    if (onSetTemplateOpacity != null) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.horizontalScroll(rememberScrollState())
+                        ) {
+                            Text(
+                                text = "Template Opacity:",
+                                color = Color(0xFF94A3B8),
+                                fontSize = 11.sp
+                            )
+                            listOf("25%" to 0.25f, "50%" to 0.50f, "75%" to 0.75f, "100%" to 1.0f).forEach { (label, op) ->
+                                OutlinedButton(
+                                    onClick = { onSetTemplateOpacity(op) },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(28.dp)
+                                ) {
+                                    Text(label, fontSize = 10.sp)
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // 3. Spacing & Margin Fine Controls
@@ -2136,20 +2598,48 @@ fun WritePageSetupModal(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.horizontalScroll(rememberScrollState())
                 ) {
-                    OutlinedButton(onClick = { yRuling = (yRuling - 5).coerceAtLeast(0) }) {
-                        Text("Y Spacing −5", fontSize = 11.sp)
+                    OutlinedButton(onClick = { yRuling = (yRuling - 20).coerceAtLeast(0) }) {
+                        Text("Y −20", fontSize = 11.sp)
                     }
-                    OutlinedButton(onClick = { yRuling = (yRuling + 5).coerceAtMost(160) }) {
-                        Text("Y Spacing +5", fontSize = 11.sp)
+                    OutlinedButton(onClick = { yRuling = (yRuling - 5).coerceAtLeast(0) }) {
+                        Text("Y −5", fontSize = 11.sp)
+                    }
+                    OutlinedButton(onClick = { yRuling = (yRuling + 5).coerceAtMost(320) }) {
+                        Text("Y +5", fontSize = 11.sp)
+                    }
+                    OutlinedButton(onClick = { yRuling = (yRuling + 20).coerceAtMost(320) }) {
+                        Text("Y +20", fontSize = 11.sp)
                     }
                     OutlinedButton(onClick = { xRuling = (xRuling - 5).coerceAtLeast(0) }) {
-                        Text("X Spacing −5", fontSize = 11.sp)
+                        Text("X −5", fontSize = 11.sp)
                     }
-                    OutlinedButton(onClick = { xRuling = (xRuling + 5).coerceAtMost(160) }) {
-                        Text("X Spacing +5", fontSize = 11.sp)
+                    OutlinedButton(onClick = { xRuling = (xRuling + 5).coerceAtMost(320) }) {
+                        Text("X +5", fontSize = 11.sp)
                     }
                     OutlinedButton(onClick = { marginLeft = if (marginLeft == 0) 80 else if (marginLeft == 80) 180 else 0 }) {
                         Text("Margin (${marginLeft}px)", fontSize = 11.sp)
+                    }
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.horizontalScroll(rememberScrollState())
+                ) {
+                    listOf(
+                        "Fine (24px)" to 24,
+                        "College (32px)" to 32,
+                        "Standard (40px)" to 40,
+                        "Wide (50px)" to 50,
+                        "High-Res 2× (64px)" to 64,
+                        "High-Res Grid (80px)" to 80
+                    ).forEach { (label, step) ->
+                        TemplateChip(
+                            label = label,
+                            selected = yRuling == step,
+                            onClick = {
+                                yRuling = step
+                                if (xRuling > 0) xRuling = step
+                            }
+                        )
                     }
                 }
 

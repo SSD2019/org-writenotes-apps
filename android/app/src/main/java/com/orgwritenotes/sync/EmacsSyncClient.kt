@@ -1,6 +1,8 @@
 package com.orgwritenotes.sync
 
 import android.content.Context
+import android.util.Base64
+import com.orgwritenotes.ink.HandwritingOcrEngine
 import com.orgwritenotes.model.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -13,11 +15,16 @@ import kotlinx.coroutines.withContext
 import okhttp3.*
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.zip.GZIPOutputStream
 
 enum class ConnectionState {
     DISCONNECTED,
@@ -31,6 +38,14 @@ enum class ConnectionState {
 private data class QueuedMutation(
     val method: String,
     val paramsJson: String
+)
+
+private data class PendingInkCommit(
+    val nodeId: String,
+    val fileName: String,
+    val canvasWidth: Int,
+    val canvasHeight: Int,
+    val exportSvgzBase64Provider: (Boolean) -> String
 )
 
 /**
@@ -49,6 +64,8 @@ class EmacsSyncClient(
     context: Context? = null
 ) {
     private val cacheDir: File? = context?.filesDir?.let { File(it, "org_writenotes_cache").apply { mkdirs() } }
+    /** D3: SQLite cache (snapshots, summaries, offline queue). Null only in context-less unit tests. */
+    private val store: OfflineStore? = context?.let { OfflineStore(it) }
     private val offlineMutationQueue = ConcurrentLinkedQueue<QueuedMutation>()
 
     private val httpClient = OkHttpClient.Builder()
@@ -60,22 +77,161 @@ class EmacsSyncClient(
     private val rpcIdGenerator = AtomicInteger(1)
     private val pendingCallbacks = ConcurrentHashMap<Int, (JSONObject) -> Unit>()
     private val commitDebounceJobs = ConcurrentHashMap<String, Job>()
+    private val pendingInkCommits = ConcurrentHashMap<String, PendingInkCommit>()
 
     companion object {
         const val INK_COMMIT_DEBOUNCE_MS = 3000L
+        const val PROTOCOL_VERSION = 2
+        private const val RECOVERY_DEBOUNCE_MS = 1000L
+        const val LARGE_SKETCH_BASE64_CHARS = 1_500_000
+        private val RECONNECT_BACKOFF_MS = longArrayOf(1000, 2000, 5000, 10000)
+    }
+
+    // --- Auto-reconnect with backoff (D5: paused while app is backgrounded) ---
+    private var lastConnectArgs: Triple<String, Boolean, String?>? = null
+    private var reconnectJob: Job? = null
+    @Volatile private var reconnectAttempt = 0
+    @Volatile var reconnectPaused: Boolean = false
+        set(value) {
+            field = value
+            if (value) reconnectJob?.cancel() else if (!isConnected()) scheduleReconnect(immediate = true)
+        }
+
+    /** D5: set by the activity's network callback; only gates non-ADB (network) connections. */
+    @Volatile var networkAvailable: Boolean = true
+        set(value) {
+            field = value
+            if (value && !reconnectPaused && !isConnected()) scheduleReconnect(immediate = true)
+            else if (!value && lastConnectArgs?.second == false) reconnectJob?.cancel()
+        }
+
+    private fun scheduleReconnect(immediate: Boolean = false) {
+        val args = lastConnectArgs ?: return
+        if (reconnectPaused || isConnected()) return
+        if (!args.second && !networkAvailable) return
+        reconnectJob?.cancel()
+        val wait = if (immediate) 0L
+            else RECONNECT_BACKOFF_MS[reconnectAttempt.coerceAtMost(RECONNECT_BACKOFF_MS.lastIndex)]
+        reconnectAttempt++
+        reconnectJob = scope.launch {
+            delay(wait)
+            if (!reconnectPaused && !isConnected()) connect(args.first, args.second, args.third)
+        }
     }
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState
 
+    // B9: Actionable connection error tracking
+    private val _lastErrorMessage = MutableStateFlow<String?>(null)
+    val lastErrorMessage: StateFlow<String?> = _lastErrorMessage
+
     private val _nodeSummaries = MutableStateFlow<List<OrgNodeSummary>>(emptyList())
     val nodeSummaries: StateFlow<List<OrgNodeSummary>> = _nodeSummaries
+
+    private val _bufferOutline = MutableStateFlow<List<OrgNodeSummary>>(emptyList())
+    val bufferOutline: StateFlow<List<OrgNodeSummary>> = _bufferOutline
+
+    private val _agendaNodes = MutableStateFlow<List<OrgNodeSummary>>(emptyList())
+    val agendaNodes: StateFlow<List<OrgNodeSummary>> = _agendaNodes
+
+    private val _searchNodes = MutableStateFlow<List<OrgNodeSummary>>(emptyList())
+    val searchNodes: StateFlow<List<OrgNodeSummary>> = _searchNodes
+
+    private val _galleryItems = MutableStateFlow<List<OrgGalleryItem>>(emptyList())
+    val galleryItems: StateFlow<List<OrgGalleryItem>> = _galleryItems
+
+    private val _pendingSharedImageBytes = MutableStateFlow<ByteArray?>(null)
+    val pendingSharedImageBytes: StateFlow<ByteArray?> = _pendingSharedImageBytes
+
+    fun setPendingSharedImageBytes(bytes: ByteArray?) {
+        _pendingSharedImageBytes.value = bytes
+    }
+
+    fun clearPendingSharedImageBytes() {
+        _pendingSharedImageBytes.value = null
+    }
+
+    fun onAppResumed() {
+        reconnectPaused = false
+        if (!isConnected() && _connectionState.value != ConnectionState.CONNECTING) {
+            if (lastConnectArgs != null) {
+                scheduleReconnect(immediate = true)
+            }
+        }
+    }
+
+    private val _emacsTheme = MutableStateFlow(OrgEmacsTheme())
+    val emacsTheme: StateFlow<OrgEmacsTheme> = _emacsTheme
+    private var userDarkThemeOverride: Boolean? = null
+
+    fun toggleCanvasDarkMode() {
+        val current = _emacsTheme.value
+        val nextDark = !current.isDark
+        userDarkThemeOverride = nextDark
+        val nextBg = if (nextDark) {
+            val parsedBg = OrgEmacsTheme.parseColorOrNull(current.bgColor)
+            if (parsedBg != null && OrgEmacsTheme.isColorDark(parsedBg)) current.bgColor else "#181825"
+        } else {
+            val parsedBg = OrgEmacsTheme.parseColorOrNull(current.bgColor)
+            if (parsedBg != null && !OrgEmacsTheme.isColorDark(parsedBg)) current.bgColor else "#FFFDF8"
+        }
+        val nextFg = if (nextDark) {
+            val parsedFg = OrgEmacsTheme.parseColorOrNull(current.fgColor)
+            if (parsedFg != null && !OrgEmacsTheme.isColorDark(parsedFg)) current.fgColor else "#CDD6F4"
+        } else {
+            val parsedFg = OrgEmacsTheme.parseColorOrNull(current.fgColor)
+            if (parsedFg != null && OrgEmacsTheme.isColorDark(parsedFg)) current.fgColor else "#1E293B"
+        }
+        _emacsTheme.value = current.copy(
+            isDark = nextDark,
+            bgColor = nextBg,
+            fgColor = nextFg
+        )
+    }
+
+    private fun applyRemoteEmacsTheme(themeObj: JSONObject, isExplicitThemeChange: Boolean) {
+        if (isExplicitThemeChange) {
+            userDarkThemeOverride = null
+        }
+        val remoteDark = themeObj.optBoolean("isDark", true)
+        val effectiveDark = userDarkThemeOverride ?: remoteDark
+        val rawBg = themeObj.optString("bgColor", if (effectiveDark) "#1E293B" else "#FFFDF8")
+        val rawFg = themeObj.optString("fgColor", if (effectiveDark) "#F8FAFC" else "#1E293B")
+        val bg = if (effectiveDark) {
+            val parsed = OrgEmacsTheme.parseColorOrNull(rawBg)
+            if (parsed != null && OrgEmacsTheme.isColorDark(parsed)) rawBg else "#181825"
+        } else {
+            val parsed = OrgEmacsTheme.parseColorOrNull(rawBg)
+            if (parsed != null && !OrgEmacsTheme.isColorDark(parsed)) rawBg else "#FFFDF8"
+        }
+        val fg = if (effectiveDark) {
+            val parsed = OrgEmacsTheme.parseColorOrNull(rawFg)
+            if (parsed != null && !OrgEmacsTheme.isColorDark(parsed)) rawFg else "#CDD6F4"
+        } else {
+            val parsed = OrgEmacsTheme.parseColorOrNull(rawFg)
+            if (parsed != null && OrgEmacsTheme.isColorDark(parsed)) rawFg else "#1E293B"
+        }
+        _emacsTheme.value = OrgEmacsTheme(
+            isDark = effectiveDark,
+            bgColor = bg,
+            fgColor = fg,
+            accentColor = themeObj.optString("accentColor", "#38BDF8")
+        )
+    }
 
     private val _activeSnapshot = MutableStateFlow<OrgNodeSnapshot?>(null)
     val activeSnapshot: StateFlow<OrgNodeSnapshot?> = _activeSnapshot
 
+    private val _zoomedInkBlockTarget = MutableStateFlow<String?>(null)
+    val zoomedInkBlockTarget: StateFlow<String?> = _zoomedInkBlockTarget
+
     private val _pendingOfflineCount = MutableStateFlow(0)
     val pendingOfflineCount: StateFlow<Int> = _pendingOfflineCount
+
+    fun clearZoomedInkBlockTarget() {
+        _zoomedInkBlockTarget.value = null
+    }
 
     init {
         loadCachedStateFromDisk()
@@ -106,12 +262,16 @@ class EmacsSyncClient(
     }
 
     private fun connect(url: String, isAdb: Boolean, token: String? = null) {
+        lastConnectArgs = Triple(url, isAdb, token)
+        reconnectJob?.cancel()
         webSocket?.cancel()
         _connectionState.value = ConnectionState.CONNECTING
 
         val request = Request.Builder().url(url).build()
         webSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                AppLogger.i("SyncClient", "Connected to Emacs (isAdb=$isAdb)")
+                _lastErrorMessage.value = null
                 _connectionState.value =
                     if (isAdb) ConnectionState.CONNECTED_ADB else ConnectionState.CONNECTED_NETWORK
 
@@ -121,11 +281,20 @@ class EmacsSyncClient(
                 val params = JSONObject().apply {
                     put("clientName", "Galaxy Tab S7")
                     put("version", "0.2.0")
+                    put("protocolVersion", PROTOCOL_VERSION)
                     if (token != null) put("token", token)
                 }
                 sendRpc("session.hello", params, queueIfOffline = false) { result ->
+                    reconnectAttempt = 0
+                    _serverCapabilities.value =
+                        result.optJSONArray("capabilities")?.toStringList()?.toSet().orEmpty()
                     val activeId = result.optString("activeNodeId", "")
+                    val themeObj = result.optJSONObject("theme")
+                    if (themeObj != null) {
+                        applyRemoteEmacsTheme(themeObj, isExplicitThemeChange = false)
+                    }
                     refreshNodeList()
+                    fetchBufferOutline()
                     if (activeId.isNotEmpty() && activeId != "null") {
                         fetchNode(activeId)
                     }
@@ -137,21 +306,59 @@ class EmacsSyncClient(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                pendingCallbacks.clear()
+                val errorDetail = when {
+                    t is java.net.ConnectException -> "Connection refused. Is Emacs running (M-x org-writenotes-start-server)?"
+                    t is java.net.SocketTimeoutException -> "Connection timed out. Check network or Tailscale status."
+                    response?.code == 401 || response?.code == 403 -> "Authentication rejected. Check session token."
+                    else -> t.localizedMessage ?: "Failed to connect to Emacs."
+                }
+                AppLogger.e("SyncClient", "Connection failure: $errorDetail", t)
+                _lastErrorMessage.value = errorDetail
                 _connectionState.value = if (_activeSnapshot.value != null) {
                     ConnectionState.OFFLINE_CACHED
                 } else {
                     ConnectionState.ERROR
                 }
+                scheduleReconnect()
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                pendingCallbacks.clear()
                 _connectionState.value = if (_activeSnapshot.value != null) {
                     ConnectionState.OFFLINE_CACHED
                 } else {
                     ConnectionState.DISCONNECTED
                 }
+                scheduleReconnect()
             }
         })
+    }
+
+    private fun parseSummaryList(arr: JSONArray?): List<OrgNodeSummary> {
+        if (arr == null) return emptyList()
+        val list = mutableListOf<OrgNodeSummary>()
+        for (i in 0 until arr.length()) {
+            val obj = arr.getJSONObject(i)
+            val nid = obj.optString("nodeId", "")
+            if (nid.isNotEmpty()) {
+                list.add(
+                    OrgNodeSummary(
+                        nodeId = nid,
+                        filePath = obj.optString("filePath", ""),
+                        level = obj.optInt("level", 1),
+                        todoKeyword = obj.optString("todoKeyword").takeIf { it.isNotEmpty() && it != "null" },
+                        priority = obj.optString("priority").takeIf { it.isNotEmpty() && it != "null" },
+                        title = obj.optString("title", "Untitled"),
+                        tags = obj.optJSONArray("tags")?.toStringList() ?: emptyList(),
+                        scheduled = obj.optString("scheduled").takeIf { it.isNotEmpty() && it != "null" },
+                        deadline = obj.optString("deadline").takeIf { it.isNotEmpty() && it != "null" },
+                        sketchCount = obj.optInt("sketchCount", 0)
+                    )
+                )
+            }
+        }
+        return list
     }
 
     fun refreshNodeList(query: String = "") {
@@ -160,25 +367,7 @@ class EmacsSyncClient(
             put("query", query)
         }
         sendRpc("node.list", params, queueIfOffline = false) { result ->
-            val arr = result.optJSONArray("nodes") ?: return@sendRpc
-            val remoteList = mutableListOf<OrgNodeSummary>()
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                val nid = obj.optString("nodeId", "")
-                if (nid.isNotEmpty()) {
-                    remoteList.add(
-                        OrgNodeSummary(
-                            nodeId = nid,
-                            filePath = obj.optString("filePath", ""),
-                            level = obj.optInt("level", 1),
-                            todoKeyword = obj.optString("todoKeyword").takeIf { it.isNotEmpty() && it != "null" },
-                            priority = obj.optString("priority").takeIf { it.isNotEmpty() && it != "null" },
-                            title = obj.optString("title", "Untitled"),
-                            tags = obj.optJSONArray("tags")?.toStringList() ?: emptyList()
-                        )
-                    )
-                }
-            }
+            val remoteList = parseSummaryList(result.optJSONArray("nodes"))
             if (remoteList.isNotEmpty()) {
                 val merged = (remoteList + _nodeSummaries.value)
                     .distinctBy { it.nodeId }
@@ -186,6 +375,81 @@ class EmacsSyncClient(
                 _nodeSummaries.value = merged
                 saveCachedSummariesToDisk(merged)
             }
+        }
+    }
+
+    fun fetchBufferOutline() {
+        val params = JSONObject().apply {
+            put("filter", "buffer_outline")
+        }
+        sendRpc("node.list", params, queueIfOffline = false) { result ->
+            _bufferOutline.value = parseSummaryList(result.optJSONArray("nodes"))
+        }
+    }
+
+    fun fetchAgendaNodes(query: String = "") {
+        val params = JSONObject().apply {
+            put("filter", "agenda")
+            put("query", query)
+        }
+        sendRpc("node.list", params, queueIfOffline = false) { result ->
+            _agendaNodes.value = parseSummaryList(result.optJSONArray("nodes"))
+        }
+    }
+
+    fun searchNodes(query: String) {
+        val params = JSONObject().apply {
+            put("filter", "search")
+            put("query", query)
+        }
+        sendRpc("node.list", params, queueIfOffline = false) { result ->
+            _searchNodes.value = parseSummaryList(result.optJSONArray("nodes"))
+        }
+    }
+
+    fun fetchGallery() {
+        sendRpc("sketch.listGallery", JSONObject(), queueIfOffline = false) { result ->
+            val arr = result.optJSONArray("sketches") ?: return@sendRpc
+            val items = mutableListOf<OrgGalleryItem>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                val fname = obj.optString("fileName", "")
+                if (fname.isNotEmpty()) {
+                    items.add(
+                        OrgGalleryItem(
+                            fileName = fname,
+                            nodeId = obj.optString("nodeId").takeIf { it.isNotEmpty() && it != "null" },
+                            nodeTitle = obj.optString("nodeTitle", "Unlinked Sketch"),
+                            modifiedTime = obj.optString("modifiedTime", ""),
+                            width = obj.optInt("width", 1200),
+                            height = obj.optInt("height", 600),
+                            svgzBase64 = obj.optString("svgzBase64").takeIf { it.isNotEmpty() && it != "null" },
+                            ocrText = obj.optString("ocrText", "")
+                        )
+                    )
+                }
+            }
+            _galleryItems.value = items
+        }
+    }
+
+    fun createNode(
+        title: String,
+        todoKeyword: String? = "TODO",
+        parentId: String? = null,
+        mode: String = "child",
+        createSketch: Boolean = false
+    ) {
+        val params = JSONObject().apply {
+            put("title", title)
+            if (todoKeyword != null) put("todoKeyword", todoKeyword)
+            if (parentId != null) put("parentId", parentId)
+            put("mode", mode)
+            put("createSketch", createSketch)
+        }
+        sendRpc("node.create", params, queueIfOffline = true) { result ->
+            updateActiveSnapshot(result)
+            fetchBufferOutline()
         }
     }
 
@@ -201,9 +465,12 @@ class EmacsSyncClient(
     }
 
     fun fetchNode(nodeId: String) {
+        flushPendingInkCommits()
         if (!isConnected()) {
-            loadCachedSnapshotForNode(nodeId)?.let {
-                _activeSnapshot.value = it
+            scope.launch(Dispatchers.IO) {
+                loadCachedSnapshotForNode(nodeId)?.let {
+                    _activeSnapshot.value = it
+                }
             }
             return
         }
@@ -238,7 +505,9 @@ class EmacsSyncClient(
         todoKeyword: String? = null,
         priority: String? = null,
         title: String? = null,
-        tags: List<String>? = null
+        tags: List<String>? = null,
+        scheduled: String? = null,
+        deadline: String? = null
     ) {
         val params = JSONObject().apply {
             put("nodeId", nodeId)
@@ -246,6 +515,8 @@ class EmacsSyncClient(
             if (priority != null) put("priority", priority)
             if (title != null) put("title", title)
             if (tags != null) put("tags", JSONArray(tags))
+            if (scheduled != null) put("scheduled", scheduled)
+            if (deadline != null) put("deadline", deadline)
         }
         sendRpc("node.updateHeader", params, queueIfOffline = true) { result ->
             updateActiveSnapshot(result)
@@ -253,14 +524,111 @@ class EmacsSyncClient(
     }
 
     fun toggleCheckbox(nodeId: String, line: Int, checked: Boolean) {
+        setCheckboxState(nodeId, line, if (checked) ChecklistState.CHECKED else ChecklistState.UNCHECKED)
+    }
+
+    fun setCheckboxState(nodeId: String, line: Int, state: ChecklistState) {
         val params = JSONObject().apply {
             put("nodeId", nodeId)
             put("line", line)
-            put("state", if (checked) "checked" else "unchecked")
+            put("state", state.toWire())
         }
         sendRpc("node.toggleCheckbox", params, queueIfOffline = true) { result ->
             updateActiveSnapshot(result)
         }
+    }
+
+    fun updateChecklistItem(
+        nodeId: String,
+        line: Int,
+        text: String? = null,
+        state: ChecklistState? = null,
+        action: String? = null
+    ) {
+        val params = JSONObject().apply {
+            put("nodeId", nodeId)
+            put("line", line)
+            if (text != null) put("text", text)
+            if (state != null) put("state", state.toWire())
+            if (action != null) put("action", action)
+        }
+        sendRpc("node.updateChecklistItem", params, queueIfOffline = true) { result ->
+            updateActiveSnapshot(result)
+        }
+    }
+
+    fun deleteChecklistItem(nodeId: String, line: Int) {
+        val params = JSONObject().apply {
+            put("nodeId", nodeId)
+            put("line", line)
+        }
+        sendRpc("node.deleteChecklistItem", params, queueIfOffline = true) { result ->
+            updateActiveSnapshot(result)
+        }
+    }
+
+    fun executeCodeBlock(nodeId: String, startLine: Int) {
+        val params = JSONObject().apply {
+            put("nodeId", nodeId)
+            put("startLine", startLine)
+        }
+        sendRpc("node.executeCodeBlock", params, queueIfOffline = false) { result ->
+            updateActiveSnapshot(result)
+        }
+    }
+
+    fun updateTableCell(nodeId: String, startLine: Int, row: Int, col: Int, value: String) {
+        val params = JSONObject().apply {
+            put("nodeId", nodeId)
+            put("startLine", startLine)
+            put("row", row)
+            put("col", col)
+            put("value", value)
+        }
+        sendRpc("node.updateTableCell", params, queueIfOffline = true) { result ->
+            updateActiveSnapshot(result)
+        }
+    }
+
+    fun clockIn(nodeId: String) {
+        val params = JSONObject().apply { put("nodeId", nodeId) }
+        sendRpc("node.clockIn", params, queueIfOffline = false) { result ->
+            updateActiveSnapshot(result)
+        }
+    }
+
+    fun clockOut(nodeId: String) {
+        val params = JSONObject().apply { put("nodeId", nodeId) }
+        sendRpc("node.clockOut", params, queueIfOffline = false) { result ->
+            updateActiveSnapshot(result)
+        }
+    }
+
+    fun insertOcrText(
+        nodeId: String,
+        text: String,
+        mode: String = "paragraph",
+        fileName: String? = null
+    ) {
+        val params = JSONObject().apply {
+            put("nodeId", nodeId)
+            put("text", text)
+            put("mode", mode)
+            if (!fileName.isNullOrEmpty()) put("fileName", fileName)
+        }
+        sendRpc("node.insertOcrText", params, queueIfOffline = true) { result ->
+            updateActiveSnapshot(result)
+        }
+    }
+
+    fun sendLaserPoint(nodeId: String, fileName: String, x: Float, y: Float) {
+        val params = JSONObject().apply {
+            put("nodeId", nodeId)
+            put("fileName", fileName)
+            put("x", x.toDouble())
+            put("y", y.toDouble())
+        }
+        sendRpc("ink.laser", params, queueIfOffline = false)
     }
 
     fun addChecklistItem(nodeId: String, text: String, afterLine: Int? = null) {
@@ -304,12 +672,66 @@ class EmacsSyncClient(
         }
     }
 
+    /** E4: Flag node for spaced repetition (org-drill / Anki). */
+    fun flagAsFlashcard(nodeId: String, onComplete: (() -> Unit)? = null) {
+        val params = JSONObject().apply { put("nodeId", nodeId) }
+        sendRpc("node.flagFlashcard", params, queueIfOffline = true) {
+            onComplete?.invoke()
+        }
+    }
+
+    private fun buildBlankSvgzBase64(width: Int, height: Int, xRuling: Int = 40, yRuling: Int = 40): String {
+        val xml = """<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="$width" height="$height" viewBox="0 0 $width $height">
+<svg class="write-doc" width="$width" height="$height" viewBox="0 0 $width $height">
+<g class="write-page" width="$width" height="$height" xruling="$xRuling" yruling="$yRuling" marginLeft="0" color="#FFFFFFFF">
+<rect class="write-background" x="0" y="0" width="$width" height="$height" fill="#FFFFFF"/>
+</g>
+<g class="write-content">
+</g>
+</svg>
+</svg>"""
+        return try {
+            val bos = ByteArrayOutputStream()
+            GZIPOutputStream(bos).use { it.write(xml.toByteArray(Charsets.UTF_8)) }
+            Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
     fun insertInkBlock(
         nodeId: String,
         afterLine: Int? = null,
         width: Int = 1200,
         height: Int = 600
     ) {
+        if (!isConnected()) {
+            // Tier 1.3 Offline Sketch Creation: generate local .svgz and optimistic InkCanvasBlock
+            val current = _activeSnapshot.value
+            if (current != null && current.nodeId == nodeId) {
+                val slug = current.header.title.lowercase(Locale.US)
+                    .replace(Regex("[^a-z0-9]+"), "-")
+                    .trim('-')
+                    .ifEmpty { "sketch" }
+                val ts = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+                val localFileName = "$slug-$ts.svgz"
+                val blankB64 = buildBlankSvgzBase64(width, height)
+                val newBlock = OrgBlock.InkCanvasBlock(
+                    blockId = "ink-offline-$ts",
+                    startLine = afterLine ?: (current.blocks.lastOrNull()?.endLine ?: 1),
+                    endLine = afterLine ?: (current.blocks.lastOrNull()?.endLine ?: 1),
+                    fileName = localFileName,
+                    linkText = "[[file:images/$localFileName]]",
+                    width = width,
+                    height = height,
+                    xRuling = 40,
+                    yRuling = 40,
+                    svgzBase64 = blankB64
+                )
+                _activeSnapshot.value = current.copy(blocks = current.blocks + newBlock)
+            }
+        }
         val params = JSONObject().apply {
             put("nodeId", nodeId)
             if (afterLine != null) put("afterLine", afterLine)
@@ -324,6 +746,7 @@ class EmacsSyncClient(
     fun deleteInkBlock(
         nodeId: String,
         fileName: String,
+        linkText: String = "",
         deleteFileOnDisk: Boolean = true
     ) {
         // Optimistically remove ink block from active snapshot immediately
@@ -335,13 +758,27 @@ class EmacsSyncClient(
             _activeSnapshot.value = current.copy(blocks = updatedBlocks)
         }
 
-        // Cancel pending debounce commits for this file
-        commitDebounceJobs[fileName]?.cancel()
-        commitDebounceJobs.remove(fileName)
+        // Cancel pending debounce commits for this file and release retained native session
+        commitDebounceJobs.remove(fileName)?.cancel()
+        pendingInkCommits.remove(fileName)?.let { abandoned ->
+            runCatching { abandoned.exportSvgzBase64Provider(false) }
+        }
+
+        // Cancel and purge any pending offline ink commits for this file
+        val targetNode = nodeId
+        val targetFile = fileName
+        offlineMutationQueue.removeAll { item ->
+            if (item.method != "ink.commit") return@removeAll false
+            val p = runCatching { JSONObject(item.paramsJson) }.getOrNull() ?: return@removeAll false
+            p.optString("fileName", "") == targetFile
+        }
+        _pendingOfflineCount.value = offlineMutationQueue.size
+        persistOfflineQueueToDisk()
 
         val params = JSONObject().apply {
             put("nodeId", nodeId)
             put("fileName", fileName)
+            if (linkText.isNotEmpty()) put("linkText", linkText)
             put("deleteFile", deleteFileOnDisk)
         }
         sendRpc("node.deleteInkBlock", params, queueIfOffline = true) { result ->
@@ -374,8 +811,8 @@ class EmacsSyncClient(
 
     /**
      * Streams a single stroke `<path .../>` immediately on stylus pen-up, then
-     * schedules a debounced `.svgz` full binary commit (3.0s idle) to update
-     * the common directory file and refresh Emacs inline display.
+     * schedules a debounced `.svgz` full binary commit (3.0s idle) on a background
+     * IO thread so `.svgz` gzip compression + Base64 encoding never block the UI thread.
      */
     fun streamStrokeAndScheduleCommit(
         nodeId: String,
@@ -383,19 +820,18 @@ class EmacsSyncClient(
         pathXml: String,
         canvasWidth: Int,
         canvasHeight: Int,
-        exportSvgzBase64Provider: () -> String
+        exportSvgzBase64Provider: (Boolean) -> String
     ) {
-        val svgzBase64 = exportSvgzBase64Provider()
-        if (svgzBase64.isNotEmpty()) {
-            val current = _activeSnapshot.value
-            if (current != null && current.nodeId == nodeId) {
+        // Only update snapshot dimensions synchronously if the canvas actually grew
+        val current = _activeSnapshot.value
+        if (current != null && current.nodeId == nodeId) {
+            val targetBlock = current.blocks.firstOrNull {
+                it is OrgBlock.InkCanvasBlock && it.fileName == fileName
+            } as? OrgBlock.InkCanvasBlock
+            if (targetBlock != null && (targetBlock.width != canvasWidth || targetBlock.height != canvasHeight)) {
                 val updatedBlocks = current.blocks.map { blk ->
                     if (blk is OrgBlock.InkCanvasBlock && blk.fileName == fileName) {
-                        blk.copy(
-                            width = canvasWidth,
-                            height = canvasHeight,
-                            svgzBase64 = svgzBase64
-                        )
+                        blk.copy(width = canvasWidth, height = canvasHeight)
                     } else {
                         blk
                     }
@@ -414,25 +850,283 @@ class EmacsSyncClient(
         }
         sendRpc("ink.delta", deltaParams, queueIfOffline = false)
 
-        commitDebounceJobs[fileName]?.cancel()
+        val pending = PendingInkCommit(
+            nodeId = nodeId,
+            fileName = fileName,
+            canvasWidth = canvasWidth,
+            canvasHeight = canvasHeight,
+            exportSvgzBase64Provider = exportSvgzBase64Provider
+        )
+        pendingInkCommits.put(fileName, pending)?.let { superseded ->
+            if (superseded !== pending) {
+                runCatching { superseded.exportSvgzBase64Provider(false) }
+            }
+        }
+
+        commitDebounceJobs.remove(fileName)?.cancel()
         commitDebounceJobs[fileName] = scope.launch(Dispatchers.IO) {
             delay(INK_COMMIT_DEBOUNCE_MS)
-            if (svgzBase64.isNotEmpty()) {
-                val commitParams = JSONObject().apply {
-                    put("nodeId", nodeId)
-                    put("fileName", fileName)
-                    put("width", canvasWidth)
-                    put("height", canvasHeight)
-                    put("svgzBase64", svgzBase64)
-                }
-                sendRpc("ink.commit", commitParams, queueIfOffline = true)
+            val toCommit = pendingInkCommits.remove(fileName) ?: return@launch
+            executeInkCommit(toCommit)
+        }
+    }
+
+    /** Immediately commit every sketch with a pending debounced save (call from onPause/onTrimMemory). */
+    fun flushAllPendingCommits() {
+        flushPendingInkCommits()
+    }
+
+    /**
+     * Asynchronously exports and commits any pending debounced `.svgz` ink changes
+     * on `Dispatchers.IO` (e.g. when closing the zoomed editor overlay or switching nodes)
+     * so `.svgz` gzip compression and Base64 encoding never block the UI thread.
+     */
+    fun flushPendingInkCommits() {
+        val keys = pendingInkCommits.keys.toList()
+        for (fileName in keys) {
+            commitDebounceJobs.remove(fileName)?.cancel()
+            val pending = pendingInkCommits.remove(fileName) ?: continue
+            scope.launch(Dispatchers.IO) {
+                executeInkCommit(pending)
             }
+        }
+    }
+
+    private fun executeInkCommit(pending: PendingInkCommit) {
+        val svgzBase64 = runCatching { pending.exportSvgzBase64Provider(true) }.getOrDefault("")
+        if (svgzBase64.isNotEmpty()) {
+            updateLocalBlockSvgz(
+                pending.nodeId,
+                pending.fileName,
+                pending.canvasWidth,
+                pending.canvasHeight,
+                svgzBase64
+            )
+            val ocrText = HandwritingOcrEngine.extractTextFromSvgzBase64(svgzBase64)
+            val commitParams = JSONObject().apply {
+                put("nodeId", pending.nodeId)
+                put("fileName", pending.fileName)
+                put("width", pending.canvasWidth)
+                put("height", pending.canvasHeight)
+                put("svgzBase64", svgzBase64)
+                if (ocrText.isNotBlank()) put("ocrText", ocrText)
+            }
+            sendInkCommit(commitParams)
+        }
+    }
+
+    private fun updateLocalBlockSvgz(
+        nodeId: String,
+        fileName: String,
+        canvasWidth: Int,
+        canvasHeight: Int,
+        svgzBase64: String
+    ) {
+        val current = _activeSnapshot.value
+        if (current != null && current.nodeId == nodeId) {
+            val updatedBlocks = current.blocks.map { blk ->
+                if (blk is OrgBlock.InkCanvasBlock && blk.fileName == fileName) {
+                    blk.copy(
+                        width = canvasWidth,
+                        height = canvasHeight,
+                        svgzBase64 = svgzBase64
+                    )
+                } else {
+                    blk
+                }
+            }
+            _activeSnapshot.value = current.copy(blocks = updatedBlocks)
+        }
+    }
+
+    fun flushPendingInkCommit(
+        nodeId: String,
+        fileName: String,
+        canvasWidth: Int,
+        canvasHeight: Int,
+        svgzBase64: String
+    ) {
+        commitDebounceJobs.remove(fileName)?.cancel()
+        pendingInkCommits.remove(fileName)?.let { abandoned ->
+            runCatching { abandoned.exportSvgzBase64Provider(false) }
+        }
+        if (svgzBase64.isEmpty()) return
+        updateLocalBlockSvgz(nodeId, fileName, canvasWidth, canvasHeight, svgzBase64)
+        val ocrText = HandwritingOcrEngine.extractTextFromSvgzBase64(svgzBase64)
+        val commitParams = JSONObject().apply {
+            put("nodeId", nodeId)
+            put("fileName", fileName)
+            put("width", canvasWidth)
+            put("height", canvasHeight)
+            put("svgzBase64", svgzBase64)
+            if (ocrText.isNotBlank()) put("ocrText", ocrText)
+        }
+        sendInkCommit(commitParams)
+    }
+
+    // --- A3 / A7: etag tracking & conflict surfacing -------------------------
+    private val knownEtags = ConcurrentHashMap<String, String>()
+
+    private val _conflictedFiles = MutableStateFlow<Set<String>>(emptySet())
+    /** Files whose last commit conflicted; Emacs saved our copy as `*.conflict-*.svgz`. */
+    val conflictedFiles: StateFlow<Set<String>> = _conflictedFiles
+
+    private val _serverCapabilities = MutableStateFlow<Set<String>>(emptySet())
+    val serverCapabilities: StateFlow<Set<String>> = _serverCapabilities
+
+    // --- E5: multi-client presence (broadcast by Emacs as `presence.update`) ---
+    data class PresenceClient(val id: String, val name: String, val nodeId: String?)
+
+    private val _presence = MutableStateFlow<List<PresenceClient>>(emptyList())
+    /** Every client currently connected to the Emacs server, including this one. */
+    val presence: StateFlow<List<PresenceClient>> = _presence
+
+    // --- D4: large-sketch warning (based on committed size; strokes dominate the payload) ---
+    private val _largeSketches = MutableStateFlow<Set<String>>(emptySet())
+    /** Sketches whose committed `.svgz` exceeds [LARGE_SKETCH_BASE64_CHARS]; the UI warns about these. */
+    val largeSketches: StateFlow<Set<String>> = _largeSketches
+
+    private fun trackSketchSize(file: String, base64Length: Int) {
+        _largeSketches.value =
+            if (base64Length > LARGE_SKETCH_BASE64_CHARS) _largeSketches.value + file
+            else _largeSketches.value - file
+    }
+
+    private fun sendInkCommit(params: JSONObject) {
+        val file = params.optString("fileName")
+        trackSketchSize(file, params.optString("svgzBase64").length)
+        knownEtags[file]?.let { if (!params.has("baseEtag")) params.put("baseEtag", it) }
+        writeRecovery(params)
+        sendRpc("ink.commit", params, queueIfOffline = true) { result ->
+            clearRecovery(file)
+            val etag = result.optString("etag", "")
+            if (result.optBoolean("conflict", false)) {
+                _conflictedFiles.value = _conflictedFiles.value + file
+                if (etag.isNotEmpty()) knownEtags[file] = etag
+            } else {
+                _conflictedFiles.value = _conflictedFiles.value - file
+                if (etag.isNotEmpty()) knownEtags[file] = etag
+            }
+        }
+    }
+
+    // --- D2: crash-recovery snapshots (one file per sketch, deleted once Emacs acks the commit) ---
+    // Getter (not an initialiser): read from `init`, which runs before later property initialisers.
+    private val recoveryDir: File? get() = cacheDir?.let { File(it, "recovery").apply { mkdirs() } }
+    private val recoveryJobs = ConcurrentHashMap<String, Job>()
+
+    private fun recoveryFile(fileName: String): File? =
+        recoveryDir?.let { File(it, "${fileName.hashCode().toUInt().toString(16)}.json") }
+
+    private fun writeRecovery(params: JSONObject) {
+        val f = recoveryFile(params.optString("fileName")) ?: return
+        runCatching {
+            val tmp = File(f.parentFile, f.name + ".tmp")
+            tmp.writeText(params.toString())
+            tmp.renameTo(f)
+        }
+    }
+
+    private fun clearRecovery(fileName: String) {
+        recoveryJobs.remove(fileName)?.cancel()
+        recoveryFile(fileName)?.delete()
+    }
+
+    /** Re-queues snapshots left behind by a crash; they replay on the next connection. */
+    private fun restoreRecoverySnapshots() {
+        val dir = recoveryDir ?: return
+        val files = dir.listFiles { f -> f.name.endsWith(".json") } ?: return
+        for (f in files) {
+            runCatching {
+                val params = JSONObject(f.readText())
+                offlineMutationQueue.add(QueuedMutation("ink.commit", params.toString()))
+                AppLogger.i("SyncClient", "Recovered unsaved sketch ${params.optString("fileName")} after restart")
+            }
+            f.delete()
+        }
+        if (files.isNotEmpty()) {
+            _pendingOfflineCount.value = offlineMutationQueue.size
+            persistOfflineQueueToDisk()
+        }
+    }
+
+    fun clearConflict(fileName: String) {
+        _conflictedFiles.value = _conflictedFiles.value - fileName
+    }
+
+    /** A2: list historical snapshots of a sketch. */
+    fun fetchSketchHistory(nodeId: String, fileName: String, onResult: (List<String>) -> Unit) {
+        val p = JSONObject().put("nodeId", nodeId).put("fileName", fileName)
+        sendRpc("ink.history", p) { r -> onResult(r.optJSONArray("snapshots")?.toStringList().orEmpty()) }
+    }
+
+    /** A2: restore a snapshot; returns new base64 svgz to reload in the canvas. */
+    fun revertSketch(nodeId: String, fileName: String, snapshot: String, onResult: (String) -> Unit) {
+        val p = JSONObject().put("nodeId", nodeId).put("fileName", fileName).put("snapshot", snapshot)
+        sendRpc("ink.revert", p) { r ->
+            r.optString("etag").takeIf { it.isNotEmpty() }?.let { knownEtags[fileName] = it }
+            onResult(r.optString("svgzBase64"))
         }
     }
 
     private fun isConnected(): Boolean {
         val st = _connectionState.value
         return st == ConnectionState.CONNECTED_ADB || st == ConnectionState.CONNECTED_NETWORK
+    }
+
+    private fun enqueueOfflineMutation(method: String, params: JSONObject) {
+        val targetNode = params.optString("nodeId", "")
+        when (method) {
+            "ink.commit" -> {
+                val targetFile = params.optString("fileName", "")
+                if (targetFile.isNotEmpty()) {
+                    offlineMutationQueue.removeAll { item ->
+                        if (item.method != "ink.commit") return@removeAll false
+                        val p = runCatching { JSONObject(item.paramsJson) }.getOrNull() ?: return@removeAll false
+                        p.optString("nodeId", "") == targetNode && p.optString("fileName", "") == targetFile
+                    }
+                }
+            }
+            "node.updateHeader" -> {
+                if (targetNode.isNotEmpty()) {
+                    var mergedParams: JSONObject? = null
+                    offlineMutationQueue.removeAll { item ->
+                        if (item.method != "node.updateHeader") return@removeAll false
+                        val p = runCatching { JSONObject(item.paramsJson) }.getOrNull() ?: return@removeAll false
+                        if (p.optString("nodeId", "") == targetNode) {
+                            val keys = params.keys()
+                            while (keys.hasNext()) {
+                                val k = keys.next()
+                                p.put(k, params.opt(k))
+                            }
+                            mergedParams = p
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    if (mergedParams != null) {
+                        offlineMutationQueue.add(QueuedMutation(method, mergedParams!!.toString()))
+                        _pendingOfflineCount.value = offlineMutationQueue.size
+                        persistOfflineQueueToDisk()
+                        return
+                    }
+                }
+            }
+            "node.setProperty" -> {
+                val targetKey = params.optString("key", "")
+                if (targetNode.isNotEmpty() && targetKey.isNotEmpty()) {
+                    offlineMutationQueue.removeAll { item ->
+                        if (item.method != "node.setProperty") return@removeAll false
+                        val p = runCatching { JSONObject(item.paramsJson) }.getOrNull() ?: return@removeAll false
+                        p.optString("nodeId", "") == targetNode && p.optString("key", "") == targetKey
+                    }
+                }
+            }
+        }
+        offlineMutationQueue.add(QueuedMutation(method, params.toString()))
+        _pendingOfflineCount.value = offlineMutationQueue.size
+        persistOfflineQueueToDisk()
     }
 
     private fun sendRpc(
@@ -444,9 +1138,7 @@ class EmacsSyncClient(
         val ws = webSocket
         if (ws == null || !isConnected()) {
             if (queueIfOffline) {
-                offlineMutationQueue.add(QueuedMutation(method, params.toString()))
-                _pendingOfflineCount.value = offlineMutationQueue.size
-                persistOfflineQueueToDisk()
+                enqueueOfflineMutation(method, params)
             }
             return
         }
@@ -463,9 +1155,7 @@ class EmacsSyncClient(
         }
         val sent = ws.send(envelope.toString())
         if (!sent && queueIfOffline) {
-            offlineMutationQueue.add(QueuedMutation(method, params.toString()))
-            _pendingOfflineCount.value = offlineMutationQueue.size
-            persistOfflineQueueToDisk()
+            enqueueOfflineMutation(method, params)
         }
     }
 
@@ -506,97 +1196,84 @@ class EmacsSyncClient(
     }
 
     private fun saveCachedSnapshotToDisk(nodeId: String, obj: JSONObject) {
-        val dir = cacheDir ?: return
-        runCatching {
-            File(dir, "active_snapshot.json").writeText(obj.toString())
-            if (nodeId.isNotEmpty()) {
-                File(dir, "node_${nodeId.hashCode().toUInt()}.json").writeText(obj.toString())
+        val db = store ?: return
+        val text = obj.toString()
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                db.putKv(OfflineStore.KEY_ACTIVE_SNAPSHOT, text)
+                if (nodeId.isNotEmpty()) db.putKv(OfflineStore.snapshotKey(nodeId), text)
             }
         }
     }
 
     private fun loadCachedSnapshotForNode(nodeId: String): OrgNodeSnapshot? {
-        val dir = cacheDir ?: return null
+        val db = store ?: return null
         return runCatching {
-            val f = File(dir, "node_${nodeId.hashCode().toUInt()}.json")
-            if (f.exists()) parseSnapshot(JSONObject(f.readText())) else null
+            db.getKv(OfflineStore.snapshotKey(nodeId))?.let { parseSnapshot(JSONObject(it)) }
         }.getOrNull()
     }
 
     private fun saveCachedSummariesToDisk(summaries: List<OrgNodeSummary>) {
-        val dir = cacheDir ?: return
-        runCatching {
-            val arr = JSONArray()
-            for (s in summaries) {
-                arr.put(JSONObject().apply {
-                    put("nodeId", s.nodeId)
-                    put("filePath", s.filePath)
-                    put("level", s.level)
-                    put("todoKeyword", s.todoKeyword ?: JSONObject.NULL)
-                    put("priority", s.priority ?: JSONObject.NULL)
-                    put("title", s.title)
-                    put("tags", JSONArray(s.tags))
-                })
+        val db = store ?: return
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                val arr = JSONArray()
+                for (s in summaries) {
+                    arr.put(JSONObject().apply {
+                        put("nodeId", s.nodeId)
+                        put("filePath", s.filePath)
+                        put("level", s.level)
+                        put("todoKeyword", s.todoKeyword ?: JSONObject.NULL)
+                        put("priority", s.priority ?: JSONObject.NULL)
+                        put("title", s.title)
+                        put("tags", JSONArray(s.tags))
+                    })
+                }
+                db.putKv(OfflineStore.KEY_SUMMARIES, arr.toString())
             }
-            File(dir, "node_summaries.json").writeText(arr.toString())
         }
     }
 
     private fun persistOfflineQueueToDisk() {
-        val dir = cacheDir ?: return
-        runCatching {
-            val arr = JSONArray()
-            for (q in offlineMutationQueue) {
-                arr.put(JSONObject().apply {
-                    put("method", q.method)
-                    put("params", q.paramsJson)
-                })
-            }
-            File(dir, "offline_queue.json").writeText(arr.toString())
+        val db = store ?: return
+        val snapshotQueue = offlineMutationQueue.map { it.method to it.paramsJson }
+        scope.launch(Dispatchers.IO) {
+            runCatching { db.replaceQueue(snapshotQueue) }
         }
     }
 
     private fun loadCachedStateFromDisk() {
-        val dir = cacheDir ?: return
-        runCatching {
-            val snapFile = File(dir, "active_snapshot.json")
-            if (snapFile.exists()) {
-                _activeSnapshot.value = parseSnapshot(JSONObject(snapFile.readText()))
-            }
-            val sumFile = File(dir, "node_summaries.json")
-            if (sumFile.exists()) {
-                val arr = JSONArray(sumFile.readText())
-                val list = mutableListOf<OrgNodeSummary>()
-                for (i in 0 until arr.length()) {
-                    val obj = arr.getJSONObject(i)
-                    val nid = obj.optString("nodeId", "")
-                    if (nid.isNotEmpty()) {
-                        list.add(
-                            OrgNodeSummary(
-                                nodeId = nid,
-                                filePath = obj.optString("filePath", ""),
-                                level = obj.optInt("level", 1),
-                                todoKeyword = obj.optString("todoKeyword").takeIf { it.isNotEmpty() && it != "null" },
-                                priority = obj.optString("priority").takeIf { it.isNotEmpty() && it != "null" },
-                                title = obj.optString("title", "Untitled"),
-                                tags = obj.optJSONArray("tags")?.toStringList() ?: emptyList()
+        val db = store ?: return
+        scope.launch(Dispatchers.IO) {
+            cacheDir?.let { db.migrateLegacyJson(it) }
+            runCatching {
+                db.getKv(OfflineStore.KEY_ACTIVE_SNAPSHOT)?.let { _activeSnapshot.value = parseSnapshot(JSONObject(it)) }
+                db.getKv(OfflineStore.KEY_SUMMARIES)?.let { text ->
+                    val arr = JSONArray(text)
+                    val list = mutableListOf<OrgNodeSummary>()
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.getJSONObject(i)
+                        val nid = obj.optString("nodeId", "")
+                        if (nid.isNotEmpty()) {
+                            list.add(
+                                OrgNodeSummary(
+                                    nodeId = nid,
+                                    filePath = obj.optString("filePath", ""),
+                                    level = obj.optInt("level", 1),
+                                    todoKeyword = obj.optString("todoKeyword").takeIf { it.isNotEmpty() && it != "null" },
+                                    priority = obj.optString("priority").takeIf { it.isNotEmpty() && it != "null" },
+                                    title = obj.optString("title", "Untitled"),
+                                    tags = obj.optJSONArray("tags")?.toStringList() ?: emptyList()
+                                )
                             )
-                        )
+                        }
                     }
+                    _nodeSummaries.value = list.distinctBy { it.nodeId }.take(50)
                 }
-                _nodeSummaries.value = list.distinctBy { it.nodeId }.take(50)
-            }
-            val qFile = File(dir, "offline_queue.json")
-            if (qFile.exists()) {
-                val arr = JSONArray(qFile.readText())
-                for (i in 0 until arr.length()) {
-                    val item = arr.getJSONObject(i)
-                    offlineMutationQueue.add(
-                        QueuedMutation(item.getString("method"), item.getString("params"))
-                    )
-                }
+                db.loadQueue().forEach { (method, params) -> offlineMutationQueue.add(QueuedMutation(method, params)) }
                 _pendingOfflineCount.value = offlineMutationQueue.size
             }
+            restoreRecoverySnapshots()
         }
     }
 
@@ -606,11 +1283,49 @@ class EmacsSyncClient(
             val id = msg.getInt("id")
             val result = msg.optJSONObject("result") ?: JSONObject()
             pendingCallbacks.remove(id)?.invoke(result)
+        } else if (msg.has("id") && msg.has("error")) {
+            val id = msg.getInt("id")
+            val errObj = msg.optJSONObject("error")
+            val errMsg = errObj?.optString("message") ?: "RPC Error"
+            android.util.Log.e("EmacsSyncClient", "RPC id $id returned error: $errMsg")
+            pendingCallbacks.remove(id)
+            // Re-fetch current node from Emacs to keep UI state consistent
+            _activeSnapshot.value?.nodeId?.let { nid ->
+                if (nid.isNotEmpty()) {
+                    fetchNode(nid)
+                }
+            }
         } else if (msg.has("method")) {
             when (msg.getString("method")) {
                 "emacs.focusNode", "emacs.nodeModified" -> {
                     val params = msg.optJSONObject("params") ?: return
                     updateActiveSnapshot(params)
+                }
+                "emacs.zoomInkBlock" -> {
+                    val params = msg.optJSONObject("params") ?: return
+                    params.optJSONObject("snapshot")?.let { snapObj ->
+                        updateActiveSnapshot(snapObj)
+                    }
+                    val targetFile = params.optString("fileName", "")
+                    if (targetFile.isNotEmpty()) {
+                        _zoomedInkBlockTarget.value = targetFile
+                    }
+                }
+                "presence.update" -> {
+                    val params = msg.optJSONObject("params") ?: return
+                    val arr = params.optJSONArray("clients") ?: JSONArray()
+                    _presence.value = (0 until arr.length()).map {
+                        val o = arr.getJSONObject(it)
+                        PresenceClient(
+                            id = o.optString("id"),
+                            name = o.optString("name", "client"),
+                            nodeId = o.optString("node").takeIf { n -> n.isNotEmpty() && n != "null" }
+                        )
+                    }
+                }
+                "emacs.themeChanged" -> {
+                    val params = msg.optJSONObject("params") ?: return
+                    applyRemoteEmacsTheme(params, isExplicitThemeChange = true)
                 }
             }
         }
@@ -637,7 +1352,11 @@ class EmacsSyncClient(
             scheduled = hdrObj.optString("scheduled").takeIf { it.isNotEmpty() && it != "null" },
             deadline = hdrObj.optString("deadline").takeIf { it.isNotEmpty() && it != "null" },
             checkboxProgress = hdrObj.optString("checkboxProgress").takeIf { it.isNotEmpty() && it != "null" },
-            properties = propsMap
+            properties = propsMap,
+            breadcrumbs = hdrObj.optJSONArray("breadcrumbs")?.toStringList() ?: emptyList(),
+            parentNodeId = hdrObj.optString("parentNodeId").takeIf { it.isNotEmpty() && it != "null" },
+            clockedIn = hdrObj.optBoolean("clockedIn", false),
+            clockedMinutes = hdrObj.optInt("clockedMinutes", 0)
         )
 
         val blocksArr = obj.optJSONArray("blocks") ?: JSONArray()
@@ -696,6 +1415,54 @@ class EmacsSyncClient(
                         )
                     )
                 }
+                "code_block" -> {
+                    blocks.add(
+                        OrgBlock.CodeBlock(
+                            blockId = blockId,
+                            startLine = startLine,
+                            endLine = endLine,
+                            language = b.optString("language", "text"),
+                            code = b.optString("code", ""),
+                            results = b.optString("results").takeIf { it.isNotEmpty() && it != "null" }
+                        )
+                    )
+                }
+                "table" -> {
+                    val rowsArr = b.optJSONArray("rows") ?: JSONArray()
+                    val rows = mutableListOf<List<String>>()
+                    for (r in 0 until rowsArr.length()) {
+                        val rowArr = rowsArr.optJSONArray(r) ?: continue
+                        rows.add(rowArr.toStringList())
+                    }
+                    blocks.add(
+                        OrgBlock.TableBlock(
+                            blockId = blockId,
+                            startLine = startLine,
+                            endLine = endLine,
+                            rows = rows
+                        )
+                    )
+                }
+            }
+        }
+
+        val subArr = obj.optJSONArray("subheadings") ?: JSONArray()
+        val subheadings = mutableListOf<OrgSubheadingItem>()
+        for (i in 0 until subArr.length()) {
+            val sObj = subArr.getJSONObject(i)
+            val nid = sObj.optString("nodeId", "")
+            if (nid.isNotEmpty()) {
+                subheadings.add(
+                    OrgSubheadingItem(
+                        nodeId = nid,
+                        level = sObj.optInt("level", 2),
+                        todoKeyword = sObj.optString("todoKeyword").takeIf { it.isNotEmpty() && it != "null" },
+                        priority = sObj.optString("priority").takeIf { it.isNotEmpty() && it != "null" },
+                        title = sObj.optString("title", "Untitled"),
+                        tags = sObj.optJSONArray("tags")?.toStringList() ?: emptyList(),
+                        sketchCount = sObj.optInt("sketchCount", 0)
+                    )
+                )
             }
         }
 
@@ -704,7 +1471,8 @@ class EmacsSyncClient(
             etag = obj.optString("etag", ""),
             filePath = obj.optString("filePath", ""),
             header = header,
-            blocks = blocks
+            blocks = blocks,
+            subheadings = subheadings
         )
     }
 

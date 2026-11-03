@@ -7,7 +7,6 @@ android {
     namespace = "com.orgwritenotes"
     compileSdk = 34
     ndkVersion = "26.3.11579264"
-    ndkVersion = "26.3.11579264"
 
     defaultConfig {
         applicationId = "com.orgwritenotes"
@@ -18,7 +17,8 @@ android {
 
         externalNativeBuild {
             cmake {
-                cppFlags += "-std=c++17 -O2"
+                cFlags += "-O3 -DNDEBUG -ffast-math -fno-math-errno"
+                cppFlags += "-std=c++17 -O3 -DNDEBUG -ffast-math -fno-math-errno"
                 abiFilters += listOf("arm64-v8a")
             }
         }
@@ -58,5 +58,6 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
+    testImplementation("junit:junit:4.13.2")
 }
 
