@@ -186,7 +186,10 @@ object OnyxEInkBridge {
                 val wasActive = isRawDrawingActive
                 if (wasActive) touchHelper.setRawDrawingEnabled(false)
                 touchHelper.setLimitRect(rect, ArrayList(excludeRects))
-                if (wasActive) touchHelper.setRawDrawingEnabled(true)
+                if (wasActive) {
+                    touchHelper.setRawDrawingEnabled(true)
+                    touchHelper.enableFingerTouch(true)
+                }
             } catch (_: Throwable) {
             }
         }
@@ -206,6 +209,8 @@ object OnyxEInkBridge {
                     touchHelper.openRawDrawing()
                     touchHelper.setRawDrawingEnabled(true)
                     touchHelper.setRawDrawingRenderEnabled(renderToEpd)
+                    // Armed raw drawing otherwise swallows finger touches (pan/zoom, buttons).
+                    touchHelper.enableFingerTouch(true)
                     isRawDrawingActive = true
                 } else if (!enabled && isRawDrawingActive) {
                     touchHelper.setRawDrawingEnabled(false)
