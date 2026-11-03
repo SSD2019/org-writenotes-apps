@@ -1,6 +1,7 @@
 package com.orgwritenotes.sync
 
 import android.content.Context
+import android.os.Build
 import android.util.Base64
 import com.orgwritenotes.ink.HandwritingOcrEngine
 import com.orgwritenotes.model.*
@@ -10,6 +11,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.*
@@ -23,7 +25,9 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
+import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.zip.GZIPOutputStream
 
 enum class ConnectionState {
@@ -37,8 +41,21 @@ enum class ConnectionState {
 
 private data class QueuedMutation(
     val method: String,
-    val paramsJson: String
+    val paramsJson: String,
+    val nodeId: String = "",
+    val fileName: String = "",
+    val key: String = ""
 )
+
+/** Builds a queue entry with its dedupe keys extracted once, so the large payload is never re-parsed. */
+private fun queuedMutation(method: String, params: JSONObject, json: String = params.toString()) =
+    QueuedMutation(
+        method = method,
+        paramsJson = json,
+        nodeId = params.optString("nodeId", ""),
+        fileName = params.optString("fileName", ""),
+        key = params.optString("key", "")
+    )
 
 private data class PendingInkCommit(
     val nodeId: String,
@@ -76,6 +93,9 @@ class EmacsSyncClient(
     private var webSocket: WebSocket? = null
     private val rpcIdGenerator = AtomicInteger(1)
     private val pendingCallbacks = ConcurrentHashMap<Int, (JSONObject) -> Unit>()
+    private val pendingMethods = ConcurrentHashMap<Int, String>()
+    /** Bumped per connection attempt so callbacks from a cancelled socket cannot touch newer state. */
+    private val connectGeneration = AtomicInteger(0)
     private val commitDebounceJobs = ConcurrentHashMap<String, Job>()
     private val pendingInkCommits = ConcurrentHashMap<String, PendingInkCommit>()
 
@@ -150,6 +170,19 @@ class EmacsSyncClient(
 
     fun clearPendingSharedImageBytes() {
         _pendingSharedImageBytes.value = null
+    }
+
+    /** Final teardown when the owning activity is finishing: stop reconnects and drop the socket. */
+    fun shutdown() {
+        reconnectPaused = true
+        reconnectJob?.cancel()
+        // Release the retained native sessions of commits that will never run.
+        for (fileName in pendingInkCommits.keys.toList()) {
+            pendingInkCommits.remove(fileName)?.let { runCatching { it.exportSvgzBase64Provider(false) } }
+        }
+        connectGeneration.incrementAndGet()
+        webSocket?.cancel()
+        webSocket = null
     }
 
     fun onAppResumed() {
@@ -262,30 +295,37 @@ class EmacsSyncClient(
     }
 
     private fun connect(url: String, isAdb: Boolean, token: String? = null) {
+        val request = try {
+            Request.Builder().url(url).build()
+        } catch (e: IllegalArgumentException) {
+            _lastErrorMessage.value = "Invalid server URL: $url"
+            _connectionState.value = ConnectionState.ERROR
+            return
+        }
         lastConnectArgs = Triple(url, isAdb, token)
         reconnectJob?.cancel()
+        val gen = connectGeneration.incrementAndGet()
         webSocket?.cancel()
         _connectionState.value = ConnectionState.CONNECTING
 
-        val request = Request.Builder().url(url).build()
         webSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (gen != connectGeneration.get()) return
                 AppLogger.i("SyncClient", "Connected to Emacs (isAdb=$isAdb)")
                 _lastErrorMessage.value = null
                 _connectionState.value =
                     if (isAdb) ConnectionState.CONNECTED_ADB else ConnectionState.CONNECTED_NETWORK
 
-                // Replay any queued offline mutations first
-                flushOfflineMutationQueue()
-
                 val params = JSONObject().apply {
-                    put("clientName", "Galaxy Tab S7")
+                    put("clientName", Build.MODEL?.takeIf { it.isNotBlank() } ?: "Android tablet")
                     put("version", "0.2.0")
                     put("protocolVersion", PROTOCOL_VERSION)
                     if (token != null) put("token", token)
                 }
                 sendRpc("session.hello", params, queueIfOffline = false) { result ->
                     reconnectAttempt = 0
+                    // Replay queued offline mutations only once the session is established.
+                    flushOfflineMutationQueue()
                     _serverCapabilities.value =
                         result.optJSONArray("capabilities")?.toStringList()?.toSet().orEmpty()
                     val activeId = result.optString("activeNodeId", "")
@@ -302,11 +342,15 @@ class EmacsSyncClient(
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                handleIncomingMessage(text)
+                if (gen != connectGeneration.get()) return
+                runCatching { handleIncomingMessage(text) }
+                    .onFailure { AppLogger.e("SyncClient", "Failed to handle message", it) }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (gen != connectGeneration.get()) return
                 pendingCallbacks.clear()
+                pendingMethods.clear()
                 val errorDetail = when {
                     t is java.net.ConnectException -> "Connection refused. Is Emacs running (M-x org-writenotes-start-server)?"
                     t is java.net.SocketTimeoutException -> "Connection timed out. Check network or Tailscale status."
@@ -324,7 +368,9 @@ class EmacsSyncClient(
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (gen != connectGeneration.get()) return
                 pendingCallbacks.clear()
+                pendingMethods.clear()
                 _connectionState.value = if (_activeSnapshot.value != null) {
                     ConnectionState.OFFLINE_CACHED
                 } else {
@@ -489,7 +535,6 @@ class EmacsSyncClient(
     }
 
     fun cyclePriority(snapshot: OrgNodeSnapshot) {
-        val priorities = listOf("A", "B", "C")
         val current = snapshot.header.priority
         val nextPrio = when (current) {
             null -> "A"
@@ -729,7 +774,9 @@ class EmacsSyncClient(
                     yRuling = 40,
                     svgzBase64 = blankB64
                 )
-                _activeSnapshot.value = current.copy(blocks = current.blocks + newBlock)
+                _activeSnapshot.update { cur ->
+                    if (cur != null && cur.nodeId == nodeId) cur.copy(blocks = cur.blocks + newBlock) else cur
+                }
             }
         }
         val params = JSONObject().apply {
@@ -750,12 +797,14 @@ class EmacsSyncClient(
         deleteFileOnDisk: Boolean = true
     ) {
         // Optimistically remove ink block from active snapshot immediately
-        val current = _activeSnapshot.value
-        if (current != null && current.nodeId == nodeId) {
-            val updatedBlocks = current.blocks.filterNot {
-                it is OrgBlock.InkCanvasBlock && it.fileName == fileName
+        _activeSnapshot.update { cur ->
+            if (cur != null && cur.nodeId == nodeId) {
+                cur.copy(blocks = cur.blocks.filterNot {
+                    it is OrgBlock.InkCanvasBlock && it.fileName == fileName
+                })
+            } else {
+                cur
             }
-            _activeSnapshot.value = current.copy(blocks = updatedBlocks)
         }
 
         // Cancel pending debounce commits for this file and release retained native session
@@ -765,13 +814,7 @@ class EmacsSyncClient(
         }
 
         // Cancel and purge any pending offline ink commits for this file
-        val targetNode = nodeId
-        val targetFile = fileName
-        offlineMutationQueue.removeAll { item ->
-            if (item.method != "ink.commit") return@removeAll false
-            val p = runCatching { JSONObject(item.paramsJson) }.getOrNull() ?: return@removeAll false
-            p.optString("fileName", "") == targetFile
-        }
+        offlineMutationQueue.removeAll { it.method == "ink.commit" && it.fileName == fileName }
         _pendingOfflineCount.value = offlineMutationQueue.size
         persistOfflineQueueToDisk()
 
@@ -823,20 +866,26 @@ class EmacsSyncClient(
         exportSvgzBase64Provider: (Boolean) -> String
     ) {
         // Only update snapshot dimensions synchronously if the canvas actually grew
-        val current = _activeSnapshot.value
-        if (current != null && current.nodeId == nodeId) {
-            val targetBlock = current.blocks.firstOrNull {
-                it is OrgBlock.InkCanvasBlock && it.fileName == fileName
-            } as? OrgBlock.InkCanvasBlock
-            if (targetBlock != null && (targetBlock.width != canvasWidth || targetBlock.height != canvasHeight)) {
-                val updatedBlocks = current.blocks.map { blk ->
+        _activeSnapshot.update { cur ->
+            val targetBlock = if (cur != null && cur.nodeId == nodeId) {
+                cur.blocks.firstOrNull {
+                    it is OrgBlock.InkCanvasBlock && it.fileName == fileName
+                } as? OrgBlock.InkCanvasBlock
+            } else {
+                null
+            }
+            if (cur != null && targetBlock != null &&
+                (targetBlock.width != canvasWidth || targetBlock.height != canvasHeight)
+            ) {
+                cur.copy(blocks = cur.blocks.map { blk ->
                     if (blk is OrgBlock.InkCanvasBlock && blk.fileName == fileName) {
                         blk.copy(width = canvasWidth, height = canvasHeight)
                     } else {
                         blk
                     }
-                }
-                _activeSnapshot.value = current.copy(blocks = updatedBlocks)
+                })
+            } else {
+                cur
             }
         }
 
@@ -922,20 +971,22 @@ class EmacsSyncClient(
         canvasHeight: Int,
         svgzBase64: String
     ) {
-        val current = _activeSnapshot.value
-        if (current != null && current.nodeId == nodeId) {
-            val updatedBlocks = current.blocks.map { blk ->
-                if (blk is OrgBlock.InkCanvasBlock && blk.fileName == fileName) {
-                    blk.copy(
-                        width = canvasWidth,
-                        height = canvasHeight,
-                        svgzBase64 = svgzBase64
-                    )
-                } else {
-                    blk
-                }
+        _activeSnapshot.update { cur ->
+            if (cur != null && cur.nodeId == nodeId) {
+                cur.copy(blocks = cur.blocks.map { blk ->
+                    if (blk is OrgBlock.InkCanvasBlock && blk.fileName == fileName) {
+                        blk.copy(
+                            width = canvasWidth,
+                            height = canvasHeight,
+                            svgzBase64 = svgzBase64
+                        )
+                    } else {
+                        blk
+                    }
+                })
+            } else {
+                cur
             }
-            _activeSnapshot.value = current.copy(blocks = updatedBlocks)
         }
     }
 
@@ -987,9 +1038,7 @@ class EmacsSyncClient(
     val largeSketches: StateFlow<Set<String>> = _largeSketches
 
     private fun trackSketchSize(file: String, base64Length: Int) {
-        _largeSketches.value =
-            if (base64Length > LARGE_SKETCH_BASE64_CHARS) _largeSketches.value + file
-            else _largeSketches.value - file
+        _largeSketches.update { if (base64Length > LARGE_SKETCH_BASE64_CHARS) it + file else it - file }
     }
 
     private fun sendInkCommit(params: JSONObject) {
@@ -997,17 +1046,18 @@ class EmacsSyncClient(
         trackSketchSize(file, params.optString("svgzBase64").length)
         knownEtags[file]?.let { if (!params.has("baseEtag")) params.put("baseEtag", it) }
         writeRecovery(params)
-        sendRpc("ink.commit", params, queueIfOffline = true) { result ->
-            clearRecovery(file)
-            val etag = result.optString("etag", "")
-            if (result.optBoolean("conflict", false)) {
-                _conflictedFiles.value = _conflictedFiles.value + file
-                if (etag.isNotEmpty()) knownEtags[file] = etag
-            } else {
-                _conflictedFiles.value = _conflictedFiles.value - file
-                if (etag.isNotEmpty()) knownEtags[file] = etag
-            }
+        sendRpc("ink.commit", params, queueIfOffline = true) { result -> onInkCommitResult(file, result) }
+    }
+
+    private fun onInkCommitResult(file: String, result: JSONObject) {
+        clearRecovery(file)
+        val etag = result.optString("etag", "")
+        if (result.optBoolean("conflict", false)) {
+            _conflictedFiles.update { it + file }
+        } else {
+            _conflictedFiles.update { it - file }
         }
+        if (etag.isNotEmpty()) knownEtags[file] = etag
     }
 
     // --- D2: crash-recovery snapshots (one file per sketch, deleted once Emacs acks the commit) ---
@@ -1016,7 +1066,10 @@ class EmacsSyncClient(
     private val recoveryJobs = ConcurrentHashMap<String, Job>()
 
     private fun recoveryFile(fileName: String): File? =
-        recoveryDir?.let { File(it, "${fileName.hashCode().toUInt().toString(16)}.json") }
+        recoveryDir?.let {
+            val digest = MessageDigest.getInstance("SHA-256").digest(fileName.toByteArray(Charsets.UTF_8))
+            File(it, "${digest.take(12).joinToString("") { b -> "%02x".format(b) }}.json")
+        }
 
     private fun writeRecovery(params: JSONObject) {
         val f = recoveryFile(params.optString("fileName")) ?: return
@@ -1039,7 +1092,7 @@ class EmacsSyncClient(
         for (f in files) {
             runCatching {
                 val params = JSONObject(f.readText())
-                offlineMutationQueue.add(QueuedMutation("ink.commit", params.toString()))
+                offlineMutationQueue.add(queuedMutation("ink.commit", params))
                 AppLogger.i("SyncClient", "Recovered unsaved sketch ${params.optString("fileName")} after restart")
             }
             f.delete()
@@ -1051,7 +1104,7 @@ class EmacsSyncClient(
     }
 
     fun clearConflict(fileName: String) {
-        _conflictedFiles.value = _conflictedFiles.value - fileName
+        _conflictedFiles.update { it - fileName }
     }
 
     /** A2: list historical snapshots of a sketch. */
@@ -1075,38 +1128,33 @@ class EmacsSyncClient(
     }
 
     private fun enqueueOfflineMutation(method: String, params: JSONObject) {
-        val targetNode = params.optString("nodeId", "")
+        val entry = queuedMutation(method, params)
         when (method) {
             "ink.commit" -> {
-                val targetFile = params.optString("fileName", "")
-                if (targetFile.isNotEmpty()) {
-                    offlineMutationQueue.removeAll { item ->
-                        if (item.method != "ink.commit") return@removeAll false
-                        val p = runCatching { JSONObject(item.paramsJson) }.getOrNull() ?: return@removeAll false
-                        p.optString("nodeId", "") == targetNode && p.optString("fileName", "") == targetFile
+                if (entry.fileName.isNotEmpty()) {
+                    offlineMutationQueue.removeAll {
+                        it.method == "ink.commit" && it.nodeId == entry.nodeId && it.fileName == entry.fileName
                     }
                 }
             }
             "node.updateHeader" -> {
-                if (targetNode.isNotEmpty()) {
+                if (entry.nodeId.isNotEmpty()) {
                     var mergedParams: JSONObject? = null
                     offlineMutationQueue.removeAll { item ->
-                        if (item.method != "node.updateHeader") return@removeAll false
-                        val p = runCatching { JSONObject(item.paramsJson) }.getOrNull() ?: return@removeAll false
-                        if (p.optString("nodeId", "") == targetNode) {
-                            val keys = params.keys()
-                            while (keys.hasNext()) {
-                                val k = keys.next()
-                                p.put(k, params.opt(k))
-                            }
-                            mergedParams = p
-                            true
-                        } else {
-                            false
+                        if (item.method != "node.updateHeader" || item.nodeId != entry.nodeId) {
+                            return@removeAll false
                         }
+                        val p = runCatching { JSONObject(item.paramsJson) }.getOrNull() ?: return@removeAll false
+                        val keys = params.keys()
+                        while (keys.hasNext()) {
+                            val k = keys.next()
+                            p.put(k, params.opt(k))
+                        }
+                        mergedParams = p
+                        true
                     }
-                    if (mergedParams != null) {
-                        offlineMutationQueue.add(QueuedMutation(method, mergedParams!!.toString()))
+                    mergedParams?.let { merged ->
+                        offlineMutationQueue.add(queuedMutation(method, merged))
                         _pendingOfflineCount.value = offlineMutationQueue.size
                         persistOfflineQueueToDisk()
                         return
@@ -1114,36 +1162,35 @@ class EmacsSyncClient(
                 }
             }
             "node.setProperty" -> {
-                val targetKey = params.optString("key", "")
-                if (targetNode.isNotEmpty() && targetKey.isNotEmpty()) {
-                    offlineMutationQueue.removeAll { item ->
-                        if (item.method != "node.setProperty") return@removeAll false
-                        val p = runCatching { JSONObject(item.paramsJson) }.getOrNull() ?: return@removeAll false
-                        p.optString("nodeId", "") == targetNode && p.optString("key", "") == targetKey
+                if (entry.nodeId.isNotEmpty() && entry.key.isNotEmpty()) {
+                    offlineMutationQueue.removeAll {
+                        it.method == "node.setProperty" && it.nodeId == entry.nodeId && it.key == entry.key
                     }
                 }
             }
         }
-        offlineMutationQueue.add(QueuedMutation(method, params.toString()))
+        offlineMutationQueue.add(entry)
         _pendingOfflineCount.value = offlineMutationQueue.size
         persistOfflineQueueToDisk()
     }
 
+    /** Returns true if the request was written to the socket. */
     private fun sendRpc(
         method: String,
         params: JSONObject,
         queueIfOffline: Boolean = false,
         onResult: ((JSONObject) -> Unit)? = null
-    ) {
+    ): Boolean {
         val ws = webSocket
         if (ws == null || !isConnected()) {
             if (queueIfOffline) {
                 enqueueOfflineMutation(method, params)
             }
-            return
+            return false
         }
 
         val id = rpcIdGenerator.getAndIncrement()
+        pendingMethods[id] = method
         if (onResult != null) {
             pendingCallbacks[id] = onResult
         }
@@ -1154,20 +1201,29 @@ class EmacsSyncClient(
             put("params", params)
         }
         val sent = ws.send(envelope.toString())
-        if (!sent && queueIfOffline) {
-            enqueueOfflineMutation(method, params)
+        if (!sent) {
+            pendingCallbacks.remove(id)
+            pendingMethods.remove(id)
+            if (queueIfOffline) enqueueOfflineMutation(method, params)
         }
+        return sent
     }
 
+    /** Replays queued edits in order; stops (keeping the rest queued) as soon as a send fails. */
     private fun flushOfflineMutationQueue() {
         while (true) {
-            val item = offlineMutationQueue.poll() ?: break
-            runCatching {
-                val params = JSONObject(item.paramsJson)
-                sendRpc(item.method, params, queueIfOffline = false)
+            val item = offlineMutationQueue.peek() ?: break
+            val params = runCatching { JSONObject(item.paramsJson) }.getOrNull()
+            val sent = when {
+                params == null -> true // corrupt entry: drop it rather than block the queue
+                item.method == "ink.commit" ->
+                    sendRpc(item.method, params, queueIfOffline = false) { onInkCommitResult(item.fileName, it) }
+                else -> sendRpc(item.method, params, queueIfOffline = false)
             }
+            if (!sent) break
+            offlineMutationQueue.remove(item)
         }
-        _pendingOfflineCount.value = 0
+        _pendingOfflineCount.value = offlineMutationQueue.size
         persistOfflineQueueToDisk()
     }
 
@@ -1183,7 +1239,7 @@ class EmacsSyncClient(
         )
 
     private fun updateActiveSnapshot(obj: JSONObject) {
-        val snap = parseSnapshot(obj)
+        val snap = preservePendingInk(parseSnapshot(obj))
         _activeSnapshot.value = snap
         saveCachedSnapshotToDisk(snap.nodeId, obj)
         if (snap.nodeId.isNotEmpty()) {
@@ -1195,13 +1251,34 @@ class EmacsSyncClient(
         }
     }
 
+    /**
+     * Sketches with uncommitted local strokes keep their local bytes: an echoed snapshot from Emacs
+     * carries the older on-disk copy and would otherwise make the canvas reload over fresh strokes.
+     */
+    private fun preservePendingInk(snap: OrgNodeSnapshot): OrgNodeSnapshot {
+        if (pendingInkCommits.isEmpty()) return snap
+        val cur = _activeSnapshot.value?.takeIf { it.nodeId == snap.nodeId } ?: return snap
+        val local = cur.blocks.filterIsInstance<OrgBlock.InkCanvasBlock>()
+            .filter { pendingInkCommits.containsKey(it.fileName) }
+            .associateBy { it.fileName }
+        if (local.isEmpty()) return snap
+        return snap.copy(blocks = snap.blocks.map { blk ->
+            val mine = (blk as? OrgBlock.InkCanvasBlock)?.let { local[it.fileName] }
+            if (mine != null) blk.copy(svgzBase64 = mine.svgzBase64) else blk
+        })
+    }
+
     private fun saveCachedSnapshotToDisk(nodeId: String, obj: JSONObject) {
         val db = store ?: return
-        val text = obj.toString()
         scope.launch(Dispatchers.IO) {
             runCatching {
-                db.putKv(OfflineStore.KEY_ACTIVE_SNAPSHOT, text)
-                if (nodeId.isNotEmpty()) db.putKv(OfflineStore.snapshotKey(nodeId), text)
+                val text = obj.toString()
+                if (nodeId.isNotEmpty()) {
+                    db.putKv(OfflineStore.snapshotKey(nodeId), text)
+                    db.putKv(OfflineStore.KEY_ACTIVE_NODE, nodeId)
+                } else {
+                    db.putKv(OfflineStore.KEY_ACTIVE_SNAPSHOT, text)
+                }
             }
         }
     }
@@ -1227,6 +1304,9 @@ class EmacsSyncClient(
                         put("priority", s.priority ?: JSONObject.NULL)
                         put("title", s.title)
                         put("tags", JSONArray(s.tags))
+                        put("scheduled", s.scheduled ?: JSONObject.NULL)
+                        put("deadline", s.deadline ?: JSONObject.NULL)
+                        put("sketchCount", s.sketchCount)
                     })
                 }
                 db.putKv(OfflineStore.KEY_SUMMARIES, arr.toString())
@@ -1234,11 +1314,22 @@ class EmacsSyncClient(
         }
     }
 
+    private val queueSeq = AtomicLong(0)
+    private val queuePersistLock = Any()
+    private var queueWrittenSeq = 0L
+
+    /** Writes are serialized and stale snapshots skipped, so an older queue can never overwrite a newer one. */
     private fun persistOfflineQueueToDisk() {
         val db = store ?: return
+        val seq = queueSeq.incrementAndGet()
         val snapshotQueue = offlineMutationQueue.map { it.method to it.paramsJson }
         scope.launch(Dispatchers.IO) {
-            runCatching { db.replaceQueue(snapshotQueue) }
+            synchronized(queuePersistLock) {
+                if (seq > queueWrittenSeq) {
+                    queueWrittenSeq = seq
+                    runCatching { db.replaceQueue(snapshotQueue) }
+                }
+            }
         }
     }
 
@@ -1247,7 +1338,9 @@ class EmacsSyncClient(
         scope.launch(Dispatchers.IO) {
             cacheDir?.let { db.migrateLegacyJson(it) }
             runCatching {
-                db.getKv(OfflineStore.KEY_ACTIVE_SNAPSHOT)?.let { _activeSnapshot.value = parseSnapshot(JSONObject(it)) }
+                val activeJson = db.getKv(OfflineStore.KEY_ACTIVE_NODE)?.let { db.getKv(OfflineStore.snapshotKey(it)) }
+                    ?: db.getKv(OfflineStore.KEY_ACTIVE_SNAPSHOT)
+                activeJson?.let { _activeSnapshot.value = parseSnapshot(JSONObject(it)) }
                 db.getKv(OfflineStore.KEY_SUMMARIES)?.let { text ->
                     val arr = JSONArray(text)
                     val list = mutableListOf<OrgNodeSummary>()
@@ -1263,14 +1356,22 @@ class EmacsSyncClient(
                                     todoKeyword = obj.optString("todoKeyword").takeIf { it.isNotEmpty() && it != "null" },
                                     priority = obj.optString("priority").takeIf { it.isNotEmpty() && it != "null" },
                                     title = obj.optString("title", "Untitled"),
-                                    tags = obj.optJSONArray("tags")?.toStringList() ?: emptyList()
+                                    tags = obj.optJSONArray("tags")?.toStringList() ?: emptyList(),
+                                    scheduled = obj.optString("scheduled").takeIf { it.isNotEmpty() && it != "null" },
+                                    deadline = obj.optString("deadline").takeIf { it.isNotEmpty() && it != "null" },
+                                    sketchCount = obj.optInt("sketchCount", 0)
                                 )
                             )
                         }
                     }
                     _nodeSummaries.value = list.distinctBy { it.nodeId }.take(50)
                 }
-                db.loadQueue().forEach { (method, params) -> offlineMutationQueue.add(QueuedMutation(method, params)) }
+                db.loadQueue().forEach { (method, params) ->
+                    offlineMutationQueue.add(
+                        runCatching { queuedMutation(method, JSONObject(params), params) }
+                            .getOrElse { QueuedMutation(method, params) }
+                    )
+                }
                 _pendingOfflineCount.value = offlineMutationQueue.size
             }
             restoreRecoverySnapshots()
@@ -1282,6 +1383,7 @@ class EmacsSyncClient(
         if (msg.has("id") && msg.has("result")) {
             val id = msg.getInt("id")
             val result = msg.optJSONObject("result") ?: JSONObject()
+            pendingMethods.remove(id)
             pendingCallbacks.remove(id)?.invoke(result)
         } else if (msg.has("id") && msg.has("error")) {
             val id = msg.getInt("id")
@@ -1289,10 +1391,16 @@ class EmacsSyncClient(
             val errMsg = errObj?.optString("message") ?: "RPC Error"
             android.util.Log.e("EmacsSyncClient", "RPC id $id returned error: $errMsg")
             pendingCallbacks.remove(id)
-            // Re-fetch current node from Emacs to keep UI state consistent
-            _activeSnapshot.value?.nodeId?.let { nid ->
-                if (nid.isNotEmpty()) {
-                    fetchNode(nid)
+            val failedMethod = pendingMethods.remove(id)
+            // Re-fetch the node after a failed mutation to resync the UI; never after a failed read
+            // (that would loop on a missing node) or a streaming ink call.
+            val isMutation = failedMethod != null && failedMethod.startsWith("node.") &&
+                failedMethod != "node.get" && failedMethod != "node.list"
+            if (isMutation) {
+                _activeSnapshot.value?.nodeId?.let { nid ->
+                    if (nid.isNotEmpty()) {
+                        fetchNode(nid)
+                    }
                 }
             }
         } else if (msg.has("method")) {

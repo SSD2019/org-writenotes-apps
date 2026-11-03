@@ -109,10 +109,11 @@ fun OrgWriteNotesTabletScreen(
         if (lastSketchRestored || zoomedInkBlockFileName != null) return@LaunchedEffect
         val snapshot = activeSnapshot ?: return@LaunchedEffect
         val prefs = context.getSharedPreferences("org_writenotes_prefs", android.content.Context.MODE_PRIVATE)
+        // One attempt only: if the first snapshot lacks the sketch, don't pop it open on a later node.
+        lastSketchRestored = true
         val last = prefs.getString("last_opened_sketch", null) ?: return@LaunchedEffect
         if (snapshot.blocks.filterIsInstance<OrgBlock.InkCanvasBlock>().any { it.fileName == last }) {
             zoomedInkBlockFileName = last
-            lastSketchRestored = true
         }
     }
 

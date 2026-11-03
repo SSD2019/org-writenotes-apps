@@ -669,6 +669,10 @@ class WriteCanvasBlockView(
     private var freeEraseLastY: Float = 0f
     private var activeEraserCursor: Triple<Float, Float, Float>? = null
     private var isHardwareErasingActive: Boolean = false
+    // Last time the barrel button was seen held (hover or touch); 0 = known released. Bridges single-event
+    // dropouts and a first DOWN that arrives before the button bit does.
+    private var lastEraserButtonMs: Long = 0L
+    private val BUTTON_DROPOUT_GRACE_MS = 100L
     private var anyErasedInGesture: Boolean = false
     var barrelButtonLassoMode: Boolean = false
     private var liveStrokeStartX: Float = 0f
@@ -1257,11 +1261,13 @@ class WriteCanvasBlockView(
             hasUncommittedChanges = false
         }
         exportExecutor.execute {
+            // Decode outside nativeLock so the main thread isn't blocked on base64 work.
+            val decoded = runCatching { Base64.decode(base64, Base64.DEFAULT) }.getOrNull()
             val loaded = synchronized(nativeLock) {
-                if (nativeHandle == 0L || cachedDetachedSvgzBase64 != base64) {
+                if (decoded == null || nativeHandle == 0L || cachedDetachedSvgzBase64 != base64) {
                     false
                 } else {
-                    val ok = WriteNativeBridge.nativeLoadSvgz(nativeHandle, Base64.decode(base64, Base64.DEFAULT))
+                    val ok = WriteNativeBridge.nativeLoadSvgz(nativeHandle, decoded)
                     if (ok) {
                         lastSyncedSvgzBase64 = base64
                         applyEInkPaperDefaultsIfNeeded()
@@ -1278,16 +1284,26 @@ class WriteCanvasBlockView(
         }
     }
 
-    fun exportSvgzBase64(): String = synchronized(nativeLock) {
-        if (nativeHandle == 0L) {
-            return cachedDetachedSvgzBase64.orEmpty()
+    fun exportSvgzBase64(): String {
+        // Retain the session under the lock, but compress outside it so touch handling isn't blocked.
+        val h = synchronized(nativeLock) {
+            if (nativeHandle == 0L) return cachedDetachedSvgzBase64.orEmpty()
+            WriteNativeBridge.nativeRetainSession(nativeHandle)
+            nativeHandle
         }
-        val bytes = WriteNativeBridge.nativeExportSvgz(nativeHandle) ?: return cachedDetachedSvgzBase64.orEmpty()
+        val bytes = try {
+            WriteNativeBridge.nativeExportSvgz(h)
+        } finally {
+            WriteNativeBridge.nativeDestroySession(h)
+        }
+        if (bytes == null) return cachedDetachedSvgzBase64.orEmpty()
         val encoded = Base64.encodeToString(bytes, Base64.NO_WRAP)
-        cachedDetachedSvgzBase64 = encoded
-        lastSyncedSvgzBase64 = encoded
-        hasUncommittedChanges = false
-        encoded
+        synchronized(nativeLock) {
+            cachedDetachedSvgzBase64 = encoded
+            lastSyncedSvgzBase64 = encoded
+            hasUncommittedChanges = false
+        }
+        return encoded
     }
 
     /**
@@ -2061,9 +2077,12 @@ class WriteCanvasBlockView(
         if (event.pointerCount > 0 && event.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS) {
             lastStylusActivityMs = event.eventTime
         }
+        val buttons = event.buttonState and
+            (MotionEvent.BUTTON_STYLUS_PRIMARY or MotionEvent.BUTTON_STYLUS_SECONDARY)
+        val lassoButton = barrelButtonLassoMode ||
+            (buttons and MotionEvent.BUTTON_STYLUS_PRIMARY) == 0
+        lastEraserButtonMs = if (buttons != 0 && !lassoButton) event.eventTime else 0L
         if (OnyxEInkBridge.isEInkDevice) {
-            val buttons = event.buttonState and
-                (MotionEvent.BUTTON_STYLUS_PRIMARY or MotionEvent.BUTTON_STYLUS_SECONDARY)
             if (buttons != 0) disarmOnyxForEraserButton() else rearmOnyxAfterEraserButton()
         }
         if (event.actionMasked == MotionEvent.ACTION_HOVER_ENTER) {
@@ -2228,7 +2247,13 @@ class WriteCanvasBlockView(
                 ((buttonState and MotionEvent.BUTTON_STYLUS_SECONDARY) != 0 &&
                  (buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) == 0)
         )
-        val isHardwareEraser = toolType == MotionEvent.TOOL_TYPE_ERASER || (isStylusButton && !isHardwareLasso)
+        val buttonErase = isStylusButton && !isHardwareLasso
+        if (buttonErase) lastEraserButtonMs = event.eventTime
+        val buttonRecentlyHeld = lastEraserButtonMs != 0L && !isHardwareLasso &&
+            toolType == MotionEvent.TOOL_TYPE_STYLUS &&
+            event.eventTime - lastEraserButtonMs < BUTTON_DROPOUT_GRACE_MS &&
+            (action == MotionEvent.ACTION_DOWN || (action == MotionEvent.ACTION_MOVE && isHardwareErasingActive))
+        val isHardwareEraser = toolType == MotionEvent.TOOL_TYPE_ERASER || buttonErase || buttonRecentlyHeld
 
         val isStylusOrMouse = toolType == MotionEvent.TOOL_TYPE_STYLUS ||
             toolType == MotionEvent.TOOL_TYPE_ERASER ||
@@ -2634,6 +2659,7 @@ class WriteCanvasBlockView(
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     isHardwareErasingActive = false
+                    lastEraserButtonMs = 0L
                     activeEraserCursor = null
                     freeEraseLastX = 0f
                     freeEraseLastY = 0f

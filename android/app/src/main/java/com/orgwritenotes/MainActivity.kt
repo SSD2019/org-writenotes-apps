@@ -16,6 +16,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import com.orgwritenotes.ink.OnyxEInkBridge
 import com.orgwritenotes.sync.EmacsSyncClient
 import com.orgwritenotes.ui.OrgWriteNotesTabletScreen
@@ -79,14 +81,16 @@ class MainActivity : ComponentActivity() {
                 intent.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
             }
             if (streamUri != null) {
-                try {
-                    contentResolver.openInputStream(streamUri)?.use { stream ->
-                        val bytes = stream.readBytes()
-                        if (bytes.isNotEmpty()) {
-                            syncClient.setPendingSharedImageBytes(bytes)
+                lifecycleScope.launch(Dispatchers.IO) {
+                    try {
+                        contentResolver.openInputStream(streamUri)?.use { stream ->
+                            val bytes = stream.readBytes()
+                            if (bytes.isNotEmpty()) {
+                                syncClient.setPendingSharedImageBytes(bytes)
+                            }
                         }
+                    } catch (_: Exception) {
                     }
-                } catch (_: Exception) {
                 }
             }
         }
@@ -132,7 +136,15 @@ class MainActivity : ComponentActivity() {
         }
         syncClient.flushAllPendingCommits()
         syncClient.reconnectPaused = true
+        // Don't keep the microphone open while backgrounded.
+        com.orgwritenotes.ink.AudioSketchRecorder.stop(applicationContext)
+        com.orgwritenotes.ink.AudioSketchRecorder.stopPlayback()
         super.onStop()
+    }
+
+    override fun onDestroy() {
+        if (isFinishing) syncClient.shutdown()
+        super.onDestroy()
     }
 
     override fun onTrimMemory(level: Int) {

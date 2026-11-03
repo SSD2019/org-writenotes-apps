@@ -19,6 +19,7 @@ class OfflineStore(private val context: Context, name: String = "org_writenotes.
     companion object {
         private const val DB_VERSION = 1
         const val KEY_ACTIVE_SNAPSHOT = "active_snapshot"
+        const val KEY_ACTIVE_NODE = "active_node_id"
         const val KEY_SUMMARIES = "node_summaries"
         fun snapshotKey(nodeId: String) = "snapshot:$nodeId"
     }

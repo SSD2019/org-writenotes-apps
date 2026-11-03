@@ -45,11 +45,14 @@ object AppLogger {
             tag,
             message
         )
-        buffer.add(LogEntry(level = level, tag = tag, message = message))
-        while (buffer.size > MAX_LOGS) {
-            buffer.pollFirst()
+        synchronized(buffer) {
+            buffer.add(LogEntry(level = level, tag = tag, message = message))
+            while (buffer.size > MAX_LOGS) {
+                buffer.pollFirst()
+            }
+            // Publish under the lock so concurrent writers can't emit snapshots out of order.
+            _logsFlow.value = buffer.toList()
         }
-        _logsFlow.value = buffer.toList()
     }
 
     fun dumpDebugBundle(): String {

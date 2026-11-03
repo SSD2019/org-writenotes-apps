@@ -2519,6 +2519,7 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeLoadSvgz(
     if (!session || !svgzBytes) return JNI_FALSE;
     jsize len = env->GetArrayLength(svgzBytes);
     jbyte* ptr = env->GetByteArrayElements(svgzBytes, nullptr);
+    if (!ptr) return JNI_FALSE;
     bool ok = session->loadSvgzBytes(reinterpret_cast<const uint8_t*>(ptr), static_cast<size_t>(len));
     env->ReleaseByteArrayElements(svgzBytes, ptr, JNI_ABORT);
     return ok ? JNI_TRUE : JNI_FALSE;
@@ -2532,6 +2533,7 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeExportSvgz(
     if (!session) return nullptr;
     std::vector<uint8_t> bytes = session->exportSvgzBytes();
     jbyteArray out = env->NewByteArray(static_cast<jsize>(bytes.size()));
+    if (!out) return nullptr;
     if (!bytes.empty()) {
         env->SetByteArrayRegion(out, 0, static_cast<jsize>(bytes.size()), reinterpret_cast<const jbyte*>(bytes.data()));
     }
@@ -2805,6 +2807,7 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeSelectLasso(
     if (!session || !xyPoints) return 0;
     jsize len = env->GetArrayLength(xyPoints);
     jfloat* pts = env->GetFloatArrayElements(xyPoints, nullptr);
+    if (!pts) return 0;
     float bounds[4] = {0, 0, 0, 0};
     int count = session->selectLasso(pts, static_cast<int>(len), bounds);
     env->ReleaseFloatArrayElements(xyPoints, pts, JNI_ABORT);
@@ -3121,6 +3124,7 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeInsertImageBytes(
     if (!session || !imageBytes) return JNI_FALSE;
     jsize len = env->GetArrayLength(imageBytes);
     jbyte* ptr = env->GetByteArrayElements(imageBytes, nullptr);
+    if (!ptr) return JNI_FALSE;
     float bounds[4] = {0, 0, 0, 0};
     bool ok = session->insertImageBytes(
         reinterpret_cast<const uint8_t*>(ptr),

@@ -80,13 +80,25 @@ fun WriteExtrasBar(
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         val view = canvas ?: return@rememberLauncherForActivityResult
         if (uri == null) return@rememberLauncherForActivityResult
-        runCatching {
-            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching
-            val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
-            view.loadFromBase64Svgz(b64)
-            syncClient.flushPendingInkCommit(nodeId, fileName, view.canvasWidthPx, view.canvasHeightPx, b64)
-            toast(context, "Imported sketch")
-        }.onFailure { toast(context, "Import failed: ${it.message}") }
+        val appContext = context.applicationContext
+        val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        Thread {
+            // Read and validate off the main thread; only a gzip-compressed SVG may replace the sketch.
+            val b64 = runCatching {
+                val bytes = appContext.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: error("could not open file")
+                val head = GZIPInputStream(ByteArrayInputStream(bytes)).use { it.readNBytes(4096) }
+                check(String(head, Charsets.UTF_8).contains("<svg")) { "not an SVG sketch" }
+                Base64.encodeToString(bytes, Base64.NO_WRAP)
+            }
+            mainHandler.post {
+                b64.onSuccess {
+                    view.loadFromBase64Svgz(it)
+                    syncClient.flushPendingInkCommit(nodeId, fileName, view.canvasWidthPx, view.canvasHeightPx, it)
+                    toast(context, "Imported sketch")
+                }.onFailure { toast(context, "Import failed: ${it.message}") }
+            }
+        }.start()
     }
 
     Row(

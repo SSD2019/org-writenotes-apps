@@ -65,12 +65,13 @@ object AudioSketchRecorder {
     private fun indexFile(context: Context, sketch: String) =
         File(dir(context), sketch.substringBeforeLast('.') + ".sessions.json")
 
+    @Synchronized
     fun start(context: Context, sketch: String): Boolean {
         if (recorder != null) return false
         val file = File(dir(context), sketch.substringBeforeLast('.') + "-${System.currentTimeMillis()}.m4a")
-        return runCatching {
-            @Suppress("DEPRECATION")
-            val r = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(context) else MediaRecorder()
+        @Suppress("DEPRECATION")
+        val r = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(context) else MediaRecorder()
+        return try {
             r.setAudioSource(MediaRecorder.AudioSource.MIC)
             r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
@@ -85,7 +86,11 @@ object AudioSketchRecorder {
             startEpoch = System.currentTimeMillis()
             _recording.value = true
             true
-        }.getOrDefault(false)
+        } catch (_: Exception) {
+            runCatching { r.release() }
+            file.delete()
+            false
+        }
     }
 
     /** Called whenever a stroke is committed on [sketch]; ignored unless recording that sketch. */
@@ -96,17 +101,23 @@ object AudioSketchRecorder {
         }
     }
 
+    @Synchronized
     fun stop(context: Context): AudioSession? {
         val r = recorder ?: return null
-        val file = currentFile ?: return null
-        val sketch = currentSketch ?: return null
-        runCatching { r.stop() }
-        r.release()
+        val file = currentFile
+        val sketch = currentSketch
+        val stopped = runCatching { r.stop() }.isSuccess
+        runCatching { r.release() }
         recorder = null
         _recording.value = false
+        if (!stopped || file == null || sketch == null) {
+            // Recording too short or failed: the .m4a is invalid, don't index it.
+            file?.delete()
+            return null
+        }
         val session = AudioSession(
             sketch, file.absolutePath, startEpoch,
-            SystemClock.elapsedRealtime() - startElapsed, synchronized(this) { strokeOffsets.toList() }
+            SystemClock.elapsedRealtime() - startElapsed, strokeOffsets.toList()
         )
         val idx = indexFile(context, sketch)
         val arr = runCatching { JSONArray(idx.readText()) }.getOrDefault(JSONArray())
