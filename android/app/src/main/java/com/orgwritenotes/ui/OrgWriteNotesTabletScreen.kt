@@ -77,6 +77,7 @@ fun OrgWriteNotesTabletScreen(
 
     var showPairingDialog by remember { mutableStateOf(false) }
     var zoomedInkBlockFileName by remember { mutableStateOf<String?>(null) }
+    var zoomedSourceView by remember { mutableStateOf<WriteCanvasBlockView?>(null) }
     var searchQuery by remember { mutableStateOf("") }
     val filteredSummaries = remember(summaries, searchQuery) {
         val q = searchQuery.trim()
@@ -112,18 +113,6 @@ fun OrgWriteNotesTabletScreen(
         activeSnapshot?.blocks?.filterIsInstance<OrgBlock.InkCanvasBlock>()?.find {
             it.fileName == targetFile
         }
-    }
-
-    if (activeSnapshot != null && zoomedBlock != null) {
-        WriteZoomedEditorOverlay(
-            nodeId = activeSnapshot!!.nodeId,
-            block = zoomedBlock,
-            syncClient = syncClient,
-            onCloseZoom = { _, _ ->
-                zoomedInkBlockFileName = null
-            }
-        )
-        return
     }
 
     val contentPadding = if (isPortrait) 12.dp else 20.dp
@@ -182,7 +171,9 @@ fun OrgWriteNotesTabletScreen(
                         isPinned = isPinned,
                         connectionState = connectionState,
                         onOpenRecentNodes = { isDrawerOpen = true },
-                        onZoomInkBlock = { fileName ->
+                        onZoomInkBlock = { fileName, sourceView ->
+                            syncClient.flushPendingInkCommits()
+                            zoomedSourceView = sourceView
                             zoomedInkBlockFileName = fileName
                         }
                     )
@@ -252,6 +243,21 @@ fun OrgWriteNotesTabletScreen(
                     )
                 }
             }
+        }
+
+        // 4. Full-Screen Zoomed Editor Overlay (rendered on top so inline views stay alive underneath)
+        if (activeSnapshot != null && zoomedBlock != null) {
+            WriteZoomedEditorOverlay(
+                nodeId = activeSnapshot!!.nodeId,
+                block = zoomedBlock,
+                syncClient = syncClient,
+                sourceInlineView = zoomedSourceView,
+                onCloseZoom = { _, _ ->
+                    syncClient.flushPendingInkCommits()
+                    zoomedSourceView = null
+                    zoomedInkBlockFileName = null
+                }
+            )
         }
     }
 
@@ -508,7 +514,7 @@ private fun HybridNodeEditorPane(
     isPinned: Boolean = true,
     connectionState: ConnectionState = ConnectionState.DISCONNECTED,
     onOpenRecentNodes: () -> Unit = {},
-    onZoomInkBlock: (String) -> Unit
+    onZoomInkBlock: (String, WriteCanvasBlockView?) -> Unit
 ) {
     var showPropertiesDrawer by remember { mutableStateOf(false) }
     var isEditingTitle by remember { mutableStateOf(false) }
@@ -557,8 +563,13 @@ private fun HybridNodeEditorPane(
     var interactionTick by remember { mutableStateOf(System.currentTimeMillis()) }
 
     val wakeUpToolbar = {
-        isToolbarVisible = true
-        interactionTick = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        if (!isToolbarVisible) {
+            isToolbarVisible = true
+            interactionTick = now
+        } else if (!isToolbarPinned && now - interactionTick > 1500L) {
+            interactionTick = now
+        }
     }
 
     // Automatically select newly inserted drawings or fallback to first drawing
@@ -846,7 +857,7 @@ private fun HybridNodeEditorPane(
                             isToolbarVisible = false
                         },
                         onZoomOrCloseFullScreen = {
-                            onZoomInkBlock(activeInkBlock.fileName)
+                            onZoomInkBlock(activeInkBlock.fileName, activeCanvasView)
                         },
                         onSelectToolMode = { newMode, newColor, newWidth, newTip, eraseDef, selectDef, insDef ->
                             activeMode = newMode
@@ -1014,7 +1025,7 @@ private fun HybridNodeEditorPane(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
                             .background(Color(0xFF0F172A))
-                            .clickable { onZoomInkBlock(activeInkBlock.fileName) }
+                            .clickable { onZoomInkBlock(activeInkBlock.fileName, activeCanvasView) }
                             .padding(horizontal = 8.dp, vertical = 3.dp)
                     ) {
                         WriteSvgIcon(asset = WriteIconAsset.FULLSCREEN, tint = Color(0xFF38BDF8), size = 13.dp)
@@ -1168,7 +1179,8 @@ private fun HybridNodeEditorPane(
                                     canvasViews[block.blockId] = view
                                 },
                                 onActivateDrawing = { view ->
-                                    if (activeInkBlockId != block.blockId) {
+                                    val switchedBlock = activeInkBlockId != block.blockId
+                                    if (switchedBlock) {
                                         // Clear any selection on the previously active drawing
                                         activeCanvasView?.clearSelection()
                                         activeInkBlockId = block.blockId
@@ -1183,9 +1195,11 @@ private fun HybridNodeEditorPane(
                                         lineDrawing,
                                         chiselAngle
                                     )
-                                    canUndo = view.canUndoNow()
-                                    canRedo = view.canRedoNow()
-                                    pageSetup = view.queryPageSetupState()
+                                    if (switchedBlock || !isToolbarVisible) {
+                                        canUndo = view.canUndoNow()
+                                        canRedo = view.canRedoNow()
+                                        pageSetup = view.queryPageSetupState()
+                                    }
                                     wakeUpToolbar()
                                 },
                                 onActiveStateUpdated = { undoAvail, redoAvail, setup, sel ->
@@ -1196,7 +1210,7 @@ private fun HybridNodeEditorPane(
                                         selectionState = sel
                                     }
                                 },
-                                onZoomIntoDrawing = { onZoomInkBlock(block.fileName) },
+                                onZoomIntoDrawing = { onZoomInkBlock(block.fileName, canvasViews[block.blockId]) },
                                 onInsertSketchAfterBlock = {
                                     syncClient.insertInkBlock(snapshot.nodeId, afterLine = block.endLine)
                                 },
@@ -1603,7 +1617,8 @@ private fun InkCanvasBlockCard(
     onInsertSketchAfterBlock: () -> Unit,
     onInsertSketchBeforeBlock: () -> Unit
 ) {
-    var canvasHeightPx by remember(block.blockId, block.height) { mutableStateOf(block.height) }
+    var canvasHeightPx by remember(block.blockId) { mutableStateOf(block.height) }
+    var dragResizeDeltaPx by remember(block.blockId) { mutableStateOf(0) }
     var canvasViewRef by remember(block.blockId) { mutableStateOf<WriteCanvasBlockView?>(null) }
     var lastLoadedSvgzBase64 by remember(block.blockId) { mutableStateOf(block.svgzBase64) }
     var localSelection by remember(block.blockId) { mutableStateOf(WriteSelectionState()) }
@@ -1690,8 +1705,12 @@ private fun InkCanvasBlockCard(
                 update = { view ->
                     onRegisterView(view)
                     if (block.svgzBase64 != lastLoadedSvgzBase64 && !block.svgzBase64.isNullOrEmpty()) {
-                        view.loadFromBase64Svgz(block.svgzBase64)
                         lastLoadedSvgzBase64 = block.svgzBase64
+                        if (block.svgzBase64 != view.lastSyncedSvgzBase64) {
+                            view.loadFromBase64Svgz(block.svgzBase64)
+                        }
+                    }
+                    if (view.canvasHeightPx != canvasHeightPx) {
                         canvasHeightPx = view.canvasHeightPx
                     }
                 },
@@ -1794,22 +1813,42 @@ private fun InkCanvasBlockCard(
                     detectVerticalDragGestures(
                         onVerticalDrag = { change, dragAmount ->
                             change.consume()
-                            val updated = (canvasHeightPx + dragAmount.toInt()).coerceIn(300, 6000)
-                            canvasHeightPx = updated
+                            val nextDelta = dragResizeDeltaPx + dragAmount.toInt()
+                            val clampedTarget = (canvasHeightPx + nextDelta).coerceIn(300, 6000)
+                            dragResizeDeltaPx = clampedTarget - canvasHeightPx
                         },
                         onDragEnd = {
-                            canvasViewRef?.resizeCanvasHeight(canvasHeightPx)
+                            if (dragResizeDeltaPx != 0) {
+                                val targetHeight = (canvasHeightPx + dragResizeDeltaPx).coerceIn(300, 6000)
+                                dragResizeDeltaPx = 0
+                                canvasHeightPx = targetHeight
+                                canvasViewRef?.resizeCanvasHeight(targetHeight)
+                            }
+                        },
+                        onDragCancel = {
+                            dragResizeDeltaPx = 0
                         }
                     )
                 }
         ) {
-            Box(
-                modifier = Modifier
-                    .width(42.dp)
-                    .height(3.dp)
-                    .clip(RoundedCornerShape(1.5.dp))
-                    .background(if (isActiveDrawing) Color(0xFF38BDF8) else Color(0xFF475569))
-            )
+            if (dragResizeDeltaPx != 0) {
+                val targetHeight = (canvasHeightPx + dragResizeDeltaPx).coerceIn(300, 6000)
+                val sign = if (dragResizeDeltaPx > 0) "+" else ""
+                Text(
+                    text = "Height: ${targetHeight}px (${sign}${dragResizeDeltaPx}px)",
+                    color = Color(0xFF38BDF8),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .width(42.dp)
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(1.5.dp))
+                        .background(if (isActiveDrawing) Color(0xFF38BDF8) else Color(0xFF475569))
+                )
+            }
         }
     }
 

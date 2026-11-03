@@ -7,6 +7,7 @@
 #include <vector>
 #include <memory>
 #include <mutex>
+#include <atomic>
 
 // Forward declarations from Stylus Labs Write (syncscribble / usvg / ulib)
 class Document;
@@ -36,10 +37,22 @@ public:
     NativeCanvasSession(int width, int height, int xRuling, int yRuling);
     ~NativeCanvasSession();
 
+    void retain();
+    void release();
+
     bool loadSvgzBytes(const uint8_t* bytes, size_t length);
     std::vector<uint8_t> exportSvgzBytes();
 
     bool renderToPixels(uint8_t* dstPixels, int bmpWidth, int bmpHeight);
+    bool renderDirtyRectToPixels(
+        uint8_t* dstPixels,
+        int bmpWidth,
+        int bmpHeight,
+        float left,
+        float top,
+        float right,
+        float bottom
+    );
 
     void setPen(
         int colorArgb,
@@ -52,12 +65,14 @@ public:
     );
     void beginStroke(float x, float y, float pressure, float tiltX, float tiltY, double timestampMs);
     void moveStroke(float x, float y, float pressure, float tiltX, float tiltY, double timestampMs);
-    std::string endStroke(bool* outHeightExpanded, int* outNewHeight);
+    void moveStrokeBatch(const float* pointsData6, int pointCount);
+    std::string endStroke(bool* outHeightExpanded, int* outNewHeight, float* outDirtyBounds4 = nullptr);
 
     // Erasers: Stroke Eraser, Ruled Line Eraser, and Free (Segment/Image) Eraser
-    bool eraseAt(float x, float y, float radius);
-    bool eraseRuledLineAt(float y);
-    bool eraseFreeSegment(float prevX, float prevY, float x, float y, float radius);
+    bool eraseAt(float x, float y, float radius, float* outDirtyBounds4 = nullptr);
+    bool eraseSegment(float prevX, float prevY, float x, float y, float radius, float* outDirtyBounds4 = nullptr);
+    bool eraseRuledLineAt(float y, float* outDirtyBounds4 = nullptr);
+    bool eraseFreeSegment(float prevX, float prevY, float x, float y, float radius, float* outDirtyBounds4 = nullptr);
 
     bool resizeCanvas(int newWidth, int newHeight);
 
@@ -183,6 +198,7 @@ private:
     std::unique_ptr<StrokeBuilder> m_activeStroke;
     std::unique_ptr<Painter> m_swPainter;
     mutable std::recursive_mutex m_mutex;
+    std::atomic<int> m_refCount{1};
 };
 
 } // namespace orgwritenotes

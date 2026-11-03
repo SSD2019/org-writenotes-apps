@@ -33,6 +33,14 @@ private data class QueuedMutation(
     val paramsJson: String
 )
 
+private data class PendingInkCommit(
+    val nodeId: String,
+    val fileName: String,
+    val canvasWidth: Int,
+    val canvasHeight: Int,
+    val exportSvgzBase64Provider: (Boolean) -> String
+)
+
 /**
  * Bidirectional JSON-RPC 2.0 WebSocket client for syncing Org-mode AST blocks
  * and Stylus Labs Write `.svgz` ink canvases with GNU Emacs (`org-writenotes.el`).
@@ -60,6 +68,7 @@ class EmacsSyncClient(
     private val rpcIdGenerator = AtomicInteger(1)
     private val pendingCallbacks = ConcurrentHashMap<Int, (JSONObject) -> Unit>()
     private val commitDebounceJobs = ConcurrentHashMap<String, Job>()
+    private val pendingInkCommits = ConcurrentHashMap<String, PendingInkCommit>()
 
     companion object {
         const val INK_COMMIT_DEBOUNCE_MS = 3000L
@@ -201,9 +210,12 @@ class EmacsSyncClient(
     }
 
     fun fetchNode(nodeId: String) {
+        flushPendingInkCommits()
         if (!isConnected()) {
-            loadCachedSnapshotForNode(nodeId)?.let {
-                _activeSnapshot.value = it
+            scope.launch(Dispatchers.IO) {
+                loadCachedSnapshotForNode(nodeId)?.let {
+                    _activeSnapshot.value = it
+                }
             }
             return
         }
@@ -335,9 +347,11 @@ class EmacsSyncClient(
             _activeSnapshot.value = current.copy(blocks = updatedBlocks)
         }
 
-        // Cancel pending debounce commits for this file
-        commitDebounceJobs[fileName]?.cancel()
-        commitDebounceJobs.remove(fileName)
+        // Cancel pending debounce commits for this file and release retained native session
+        commitDebounceJobs.remove(fileName)?.cancel()
+        pendingInkCommits.remove(fileName)?.let { abandoned ->
+            runCatching { abandoned.exportSvgzBase64Provider(false) }
+        }
 
         val params = JSONObject().apply {
             put("nodeId", nodeId)
@@ -374,8 +388,8 @@ class EmacsSyncClient(
 
     /**
      * Streams a single stroke `<path .../>` immediately on stylus pen-up, then
-     * schedules a debounced `.svgz` full binary commit (3.0s idle) to update
-     * the common directory file and refresh Emacs inline display.
+     * schedules a debounced `.svgz` full binary commit (3.0s idle) on a background
+     * IO thread so `.svgz` gzip compression + Base64 encoding never block the UI thread.
      */
     fun streamStrokeAndScheduleCommit(
         nodeId: String,
@@ -383,19 +397,18 @@ class EmacsSyncClient(
         pathXml: String,
         canvasWidth: Int,
         canvasHeight: Int,
-        exportSvgzBase64Provider: () -> String
+        exportSvgzBase64Provider: (Boolean) -> String
     ) {
-        val svgzBase64 = exportSvgzBase64Provider()
-        if (svgzBase64.isNotEmpty()) {
-            val current = _activeSnapshot.value
-            if (current != null && current.nodeId == nodeId) {
+        // Only update snapshot dimensions synchronously if the canvas actually grew
+        val current = _activeSnapshot.value
+        if (current != null && current.nodeId == nodeId) {
+            val targetBlock = current.blocks.firstOrNull {
+                it is OrgBlock.InkCanvasBlock && it.fileName == fileName
+            } as? OrgBlock.InkCanvasBlock
+            if (targetBlock != null && (targetBlock.width != canvasWidth || targetBlock.height != canvasHeight)) {
                 val updatedBlocks = current.blocks.map { blk ->
                     if (blk is OrgBlock.InkCanvasBlock && blk.fileName == fileName) {
-                        blk.copy(
-                            width = canvasWidth,
-                            height = canvasHeight,
-                            svgzBase64 = svgzBase64
-                        )
+                        blk.copy(width = canvasWidth, height = canvasHeight)
                     } else {
                         blk
                     }
@@ -414,19 +427,85 @@ class EmacsSyncClient(
         }
         sendRpc("ink.delta", deltaParams, queueIfOffline = false)
 
-        commitDebounceJobs[fileName]?.cancel()
+        val pending = PendingInkCommit(
+            nodeId = nodeId,
+            fileName = fileName,
+            canvasWidth = canvasWidth,
+            canvasHeight = canvasHeight,
+            exportSvgzBase64Provider = exportSvgzBase64Provider
+        )
+        pendingInkCommits.put(fileName, pending)?.let { superseded ->
+            if (superseded !== pending) {
+                runCatching { superseded.exportSvgzBase64Provider(false) }
+            }
+        }
+
+        commitDebounceJobs.remove(fileName)?.cancel()
         commitDebounceJobs[fileName] = scope.launch(Dispatchers.IO) {
             delay(INK_COMMIT_DEBOUNCE_MS)
-            if (svgzBase64.isNotEmpty()) {
-                val commitParams = JSONObject().apply {
-                    put("nodeId", nodeId)
-                    put("fileName", fileName)
-                    put("width", canvasWidth)
-                    put("height", canvasHeight)
-                    put("svgzBase64", svgzBase64)
-                }
-                sendRpc("ink.commit", commitParams, queueIfOffline = true)
+            val toCommit = pendingInkCommits.remove(fileName) ?: return@launch
+            executeInkCommit(toCommit)
+        }
+    }
+
+    /**
+     * Asynchronously exports and commits any pending debounced `.svgz` ink changes
+     * on `Dispatchers.IO` (e.g. when closing the zoomed editor overlay or switching nodes)
+     * so `.svgz` gzip compression and Base64 encoding never block the UI thread.
+     */
+    fun flushPendingInkCommits() {
+        val keys = pendingInkCommits.keys.toList()
+        for (fileName in keys) {
+            commitDebounceJobs.remove(fileName)?.cancel()
+            val pending = pendingInkCommits.remove(fileName) ?: continue
+            scope.launch(Dispatchers.IO) {
+                executeInkCommit(pending)
             }
+        }
+    }
+
+    private fun executeInkCommit(pending: PendingInkCommit) {
+        val svgzBase64 = runCatching { pending.exportSvgzBase64Provider(true) }.getOrDefault("")
+        if (svgzBase64.isNotEmpty()) {
+            updateLocalBlockSvgz(
+                pending.nodeId,
+                pending.fileName,
+                pending.canvasWidth,
+                pending.canvasHeight,
+                svgzBase64
+            )
+            val commitParams = JSONObject().apply {
+                put("nodeId", pending.nodeId)
+                put("fileName", pending.fileName)
+                put("width", pending.canvasWidth)
+                put("height", pending.canvasHeight)
+                put("svgzBase64", svgzBase64)
+            }
+            sendRpc("ink.commit", commitParams, queueIfOffline = true)
+        }
+    }
+
+    private fun updateLocalBlockSvgz(
+        nodeId: String,
+        fileName: String,
+        canvasWidth: Int,
+        canvasHeight: Int,
+        svgzBase64: String
+    ) {
+        val current = _activeSnapshot.value
+        if (current != null && current.nodeId == nodeId) {
+            val updatedBlocks = current.blocks.map { blk ->
+                if (blk is OrgBlock.InkCanvasBlock && blk.fileName == fileName) {
+                    blk.copy(
+                        width = canvasWidth,
+                        height = canvasHeight,
+                        svgzBase64 = svgzBase64
+                    )
+                } else {
+                    blk
+                }
+            }
+            _activeSnapshot.value = current.copy(blocks = updatedBlocks)
         }
     }
 
@@ -507,10 +586,13 @@ class EmacsSyncClient(
 
     private fun saveCachedSnapshotToDisk(nodeId: String, obj: JSONObject) {
         val dir = cacheDir ?: return
-        runCatching {
-            File(dir, "active_snapshot.json").writeText(obj.toString())
-            if (nodeId.isNotEmpty()) {
-                File(dir, "node_${nodeId.hashCode().toUInt()}.json").writeText(obj.toString())
+        val serialized = obj.toString()
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                File(dir, "active_snapshot.json").writeText(serialized)
+                if (nodeId.isNotEmpty()) {
+                    File(dir, "node_${nodeId.hashCode().toUInt()}.json").writeText(serialized)
+                }
             }
         }
     }
@@ -525,77 +607,84 @@ class EmacsSyncClient(
 
     private fun saveCachedSummariesToDisk(summaries: List<OrgNodeSummary>) {
         val dir = cacheDir ?: return
-        runCatching {
-            val arr = JSONArray()
-            for (s in summaries) {
-                arr.put(JSONObject().apply {
-                    put("nodeId", s.nodeId)
-                    put("filePath", s.filePath)
-                    put("level", s.level)
-                    put("todoKeyword", s.todoKeyword ?: JSONObject.NULL)
-                    put("priority", s.priority ?: JSONObject.NULL)
-                    put("title", s.title)
-                    put("tags", JSONArray(s.tags))
-                })
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                val arr = JSONArray()
+                for (s in summaries) {
+                    arr.put(JSONObject().apply {
+                        put("nodeId", s.nodeId)
+                        put("filePath", s.filePath)
+                        put("level", s.level)
+                        put("todoKeyword", s.todoKeyword ?: JSONObject.NULL)
+                        put("priority", s.priority ?: JSONObject.NULL)
+                        put("title", s.title)
+                        put("tags", JSONArray(s.tags))
+                    })
+                }
+                File(dir, "node_summaries.json").writeText(arr.toString())
             }
-            File(dir, "node_summaries.json").writeText(arr.toString())
         }
     }
 
     private fun persistOfflineQueueToDisk() {
         val dir = cacheDir ?: return
-        runCatching {
-            val arr = JSONArray()
-            for (q in offlineMutationQueue) {
-                arr.put(JSONObject().apply {
-                    put("method", q.method)
-                    put("params", q.paramsJson)
-                })
+        val snapshotQueue = offlineMutationQueue.toList()
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                val arr = JSONArray()
+                for (q in snapshotQueue) {
+                    arr.put(JSONObject().apply {
+                        put("method", q.method)
+                        put("params", q.paramsJson)
+                    })
+                }
+                File(dir, "offline_queue.json").writeText(arr.toString())
             }
-            File(dir, "offline_queue.json").writeText(arr.toString())
         }
     }
 
     private fun loadCachedStateFromDisk() {
         val dir = cacheDir ?: return
-        runCatching {
-            val snapFile = File(dir, "active_snapshot.json")
-            if (snapFile.exists()) {
-                _activeSnapshot.value = parseSnapshot(JSONObject(snapFile.readText()))
-            }
-            val sumFile = File(dir, "node_summaries.json")
-            if (sumFile.exists()) {
-                val arr = JSONArray(sumFile.readText())
-                val list = mutableListOf<OrgNodeSummary>()
-                for (i in 0 until arr.length()) {
-                    val obj = arr.getJSONObject(i)
-                    val nid = obj.optString("nodeId", "")
-                    if (nid.isNotEmpty()) {
-                        list.add(
-                            OrgNodeSummary(
-                                nodeId = nid,
-                                filePath = obj.optString("filePath", ""),
-                                level = obj.optInt("level", 1),
-                                todoKeyword = obj.optString("todoKeyword").takeIf { it.isNotEmpty() && it != "null" },
-                                priority = obj.optString("priority").takeIf { it.isNotEmpty() && it != "null" },
-                                title = obj.optString("title", "Untitled"),
-                                tags = obj.optJSONArray("tags")?.toStringList() ?: emptyList()
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                val snapFile = File(dir, "active_snapshot.json")
+                if (snapFile.exists()) {
+                    _activeSnapshot.value = parseSnapshot(JSONObject(snapFile.readText()))
+                }
+                val sumFile = File(dir, "node_summaries.json")
+                if (sumFile.exists()) {
+                    val arr = JSONArray(sumFile.readText())
+                    val list = mutableListOf<OrgNodeSummary>()
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.getJSONObject(i)
+                        val nid = obj.optString("nodeId", "")
+                        if (nid.isNotEmpty()) {
+                            list.add(
+                                OrgNodeSummary(
+                                    nodeId = nid,
+                                    filePath = obj.optString("filePath", ""),
+                                    level = obj.optInt("level", 1),
+                                    todoKeyword = obj.optString("todoKeyword").takeIf { it.isNotEmpty() && it != "null" },
+                                    priority = obj.optString("priority").takeIf { it.isNotEmpty() && it != "null" },
+                                    title = obj.optString("title", "Untitled"),
+                                    tags = obj.optJSONArray("tags")?.toStringList() ?: emptyList()
+                                )
                             )
+                        }
+                    }
+                    _nodeSummaries.value = list.distinctBy { it.nodeId }.take(50)
+                }
+                val qFile = File(dir, "offline_queue.json")
+                if (qFile.exists()) {
+                    val arr = JSONArray(qFile.readText())
+                    for (i in 0 until arr.length()) {
+                        val item = arr.getJSONObject(i)
+                        offlineMutationQueue.add(
+                            QueuedMutation(item.getString("method"), item.getString("params"))
                         )
                     }
+                    _pendingOfflineCount.value = offlineMutationQueue.size
                 }
-                _nodeSummaries.value = list.distinctBy { it.nodeId }.take(50)
-            }
-            val qFile = File(dir, "offline_queue.json")
-            if (qFile.exists()) {
-                val arr = JSONArray(qFile.readText())
-                for (i in 0 until arr.length()) {
-                    val item = arr.getJSONObject(i)
-                    offlineMutationQueue.add(
-                        QueuedMutation(item.getString("method"), item.getString("params"))
-                    )
-                }
-                _pendingOfflineCount.value = offlineMutationQueue.size
             }
         }
     }

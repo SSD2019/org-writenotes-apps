@@ -21,6 +21,7 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 enum class StylusToolMode {
     PAN,
@@ -99,10 +100,19 @@ object WriteNativeBridge {
     }
 
     external fun nativeCreateSession(width: Int, height: Int, xRuling: Int, yRuling: Int): Long
+    external fun nativeRetainSession(handle: Long)
     external fun nativeDestroySession(handle: Long)
     external fun nativeLoadSvgz(handle: Long, svgzBytes: ByteArray): Boolean
     external fun nativeExportSvgz(handle: Long): ByteArray?
     external fun nativeRenderToBitmap(handle: Long, bitmap: Bitmap): Boolean
+    external fun nativeRenderDirtyRectToBitmap(
+        handle: Long,
+        bitmap: Bitmap,
+        left: Float,
+        top: Float,
+        right: Float,
+        bottom: Float
+    ): Boolean
     external fun nativeSetPen(
         handle: Long,
         colorArgb: Int,
@@ -131,6 +141,11 @@ object WriteNativeBridge {
         tiltY: Float,
         timestampMs: Double
     )
+    external fun nativeMoveStrokeBatch(
+        handle: Long,
+        pointsData6: FloatArray,
+        pointCount: Int
+    )
     external fun nativeEndStroke(handle: Long, outNewDimensions: IntArray): String
     external fun nativeEraseAt(handle: Long, x: Float, y: Float, radius: Float): Boolean
     external fun nativeEraseRuledLineAt(handle: Long, y: Float): Boolean
@@ -141,6 +156,16 @@ object WriteNativeBridge {
         x: Float,
         y: Float,
         radius: Float
+    ): Boolean
+    external fun nativeEraseSegmentDirty(
+        handle: Long,
+        prevX: Float,
+        prevY: Float,
+        x: Float,
+        y: Float,
+        radius: Float,
+        eraseMode: Int,
+        outDirty4: FloatArray
     ): Boolean
 
     external fun nativeSelectRect(
@@ -261,7 +286,8 @@ class WriteCanvasBlockView(
     private var xRuling: Int = 40,
     private var yRuling: Int = 40,
     val isZoomedMode: Boolean = false,
-    private val onStrokeCommitted: (pathXml: String, width: Int, height: Int, exportSvgzBase64: () -> String) -> Unit,
+    adoptFromView: WriteCanvasBlockView? = null,
+    private val onStrokeCommitted: (pathXml: String, width: Int, height: Int, exportSvgzBase64: (Boolean) -> String) -> Unit,
     private val onHeightExpanded: (newHeightPx: Int) -> Unit,
     var onSelectionChanged: ((WriteSelectionState) -> Unit)? = null,
     var onViewportChanged: ((zoomScale: Float, canUndo: Boolean, canRedo: Boolean, pageSetup: WritePageSetupState) -> Unit)? = null,
@@ -281,6 +307,24 @@ class WriteCanvasBlockView(
     var canvasHeightPx: Int = initialHeight
         private set
     private var backingBitmap: Bitmap? = null
+    private var backingScale: Float = 1.0f
+    private var overviewBitmap: Bitmap? = null
+    private var overviewCanvas: Canvas? = null
+    private var overviewDirty: Boolean = true
+    private val overviewDirtyRect = RectF()
+    private val overviewSrcRect = android.graphics.Rect()
+    private val overviewDstRect = RectF()
+    private val dstPageRect = RectF()
+
+    private var cachedPageSetup = WritePageSetupState(
+        width = initialWidth,
+        height = initialHeight,
+        xRuling = xRuling,
+        yRuling = yRuling
+    )
+    private var cachedCanUndo: Boolean = false
+    private var cachedCanRedo: Boolean = false
+    private var lastReportedZoomPct: Int = 100
 
     var toolMode: StylusToolMode = StylusToolMode.PEN
     var singleTouchPanInZoomedMode: Boolean = true
@@ -329,8 +373,33 @@ class WriteCanvasBlockView(
 
     private var freeEraseLastX: Float = 0f
     private var freeEraseLastY: Float = 0f
+    private var anyErasedInGesture: Boolean = false
     private var liveStrokeStartX: Float = 0f
     private var liveStrokeStartY: Float = 0f
+    private var liveStrokeLastX: Float = 0f
+    private var liveStrokeLastY: Float = 0f
+    private var liveStrokeLastTimeMs: Double = 0.0
+    private var liveStrokeVelX: Float = 0f
+    private var liveStrokeVelY: Float = 0f
+
+    // Pre-allocated primitive buffers and paths to avoid per-frame / per-touch GC pressure
+    private val tmpPageInfo10 = IntArray(10)
+    private val tmpDimsAndDirty6 = IntArray(6)
+    private val tmpDims2 = IntArray(2)
+    private val tmpBounds4 = FloatArray(4)
+    private val tmpDirty4 = FloatArray(4)
+    private var strokeBatchBuf = FloatArray(64 * 6)
+    private val reusableLiveStrokePath = Path()
+    private val predictedTipPath = Path()
+    private val tmpDrawRect = RectF()
+    private val tmpHitRect = RectF()
+
+    @Volatile
+    var lastSyncedSvgzBase64: String? = null
+        private set
+
+    @Volatile
+    private var adoptedPeer: WriteCanvasBlockView? = null
 
     // Pan gesture tracking
     private var isPanningGesture = false
@@ -413,29 +482,43 @@ class WriteCanvasBlockView(
                 panOffsetX = focusX - (focusX - panOffsetX) * (newScale / prevScale)
                 panOffsetY = focusY - (focusY - panOffsetY) * (newScale / prevScale)
                 zoomScale = newScale
-                notifyViewportUpdated()
+                val newPct = (newScale * 100f).roundToInt()
+                if (newPct != lastReportedZoomPct) {
+                    lastReportedZoomPct = newPct
+                    notifyZoomOnlyUpdated()
+                }
                 invalidate()
                 return true
+            }
+
+            override fun onScaleEnd(detector: ScaleGestureDetector) {
+                if (!isZoomedMode) return
+                lastReportedZoomPct = (zoomScale * 100f).roundToInt()
+                notifyZoomOnlyUpdated()
             }
         }
     )
 
     init {
         if (WriteNativeBridge.isNativeLoaded) {
-            nativeHandle = WriteNativeBridge.nativeCreateSession(
-                initialWidth, initialHeight, xRuling, yRuling
-            )
-            WriteNativeBridge.nativeSetPen(
-                nativeHandle,
-                penColorArgb,
-                penWidthPx,
-                pressureSensitive,
-                penTip.nativeCode,
-                snapToGrid,
-                lineDrawing,
-                penChiselAngle
-            )
-            refreshBackingBitmap()
+            if (adoptFromView != null && adoptFromView.nativeHandle != 0L) {
+                adoptSessionAndBitmapFrom(adoptFromView, transferBitmapOwnership = false)
+            } else {
+                nativeHandle = WriteNativeBridge.nativeCreateSession(
+                    initialWidth, initialHeight, xRuling, yRuling
+                )
+                WriteNativeBridge.nativeSetPen(
+                    nativeHandle,
+                    penColorArgb,
+                    penWidthPx,
+                    pressureSensitive,
+                    penTip.nativeCode,
+                    snapToGrid,
+                    lineDrawing,
+                    penChiselAngle
+                )
+                refreshBackingBitmap()
+            }
         }
     }
 
@@ -445,26 +528,110 @@ class WriteCanvasBlockView(
     private fun screenToCanvasY(screenY: Float): Float =
         if (isZoomedMode) (screenY - panOffsetY) / zoomScale else screenY
 
-    private fun snapCoordIfEnabled(x: Float, y: Float): Pair<Float, Float> {
-        if (!snapToGrid) return x to y
+    private fun snapX(x: Float): Float {
+        if (!snapToGrid) return x
         val yr = if (yRuling > 0) yRuling.toFloat() else 40f
         val xr = if (xRuling > 0) xRuling.toFloat() else yr
-        val sx = floor(x / xr + 0.5f) * xr
-        val sy = floor(y / yr + 0.5f) * yr
-        return sx to sy
+        return floor(x / xr + 0.5f) * xr
+    }
+
+    private fun snapY(y: Float): Float {
+        if (!snapToGrid) return y
+        val yr = if (yRuling > 0) yRuling.toFloat() else 40f
+        return floor(y / yr + 0.5f) * yr
+    }
+
+    private fun computeTargetBackingScale(w: Int, h: Int): Float {
+        val maxDim = max(w, h).coerceAtLeast(1).toFloat()
+        val totalPixels = w.toFloat() * h.toFloat()
+        val dimScale = 2560f / maxDim
+        val areaScale = if (totalPixels > 3_600_000f) sqrt(3_600_000f / totalPixels) else 1.0f
+        return min(1.0f, min(dimScale, areaScale)).coerceAtLeast(0.25f)
+    }
+
+    private fun computeTargetBitmapDims(w: Int, h: Int): Pair<Int, Int> {
+        val cw = w.coerceAtLeast(100)
+        val ch = h.coerceAtLeast(100)
+        val scale = computeTargetBackingScale(cw, ch)
+        backingScale = scale
+        val bmpW = (cw * scale).roundToInt().coerceAtLeast(100)
+        val bmpH = (ch * scale).roundToInt().coerceAtLeast(100)
+        return bmpW to bmpH
     }
 
     private fun ensureBackingBitmap(): Bitmap {
-        val w = canvasWidthPx.coerceAtLeast(100)
-        val h = canvasHeightPx.coerceAtLeast(100)
+        val (bmpW, bmpH) = computeTargetBitmapDims(canvasWidthPx, canvasHeightPx)
         val existing = backingBitmap
-        if (existing != null && existing.width == w && existing.height == h) {
+        if (existing != null && existing.width == bmpW && existing.height == bmpH) {
             return existing
         }
         existing?.recycle()
-        val created = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val created = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
         backingBitmap = created
         return created
+    }
+
+    private fun invalidateOverviewFull() {
+        overviewDirty = true
+        overviewDirtyRect.set(0f, 0f, canvasWidthPx.toFloat(), canvasHeightPx.toFloat())
+    }
+
+    private fun invalidateOverviewRect(left: Float, top: Float, right: Float, bottom: Float) {
+        if (!overviewDirty) {
+            overviewDirty = true
+            overviewDirtyRect.set(left, top, right, bottom)
+        } else {
+            overviewDirtyRect.union(left, top, right, bottom)
+        }
+    }
+
+    private fun ensureOverviewBitmapIfNeeded(): Bitmap? {
+        val primary = backingBitmap ?: return null
+        val targetW = (primary.width / 2).coerceAtLeast(64)
+        val targetH = (primary.height / 2).coerceAtLeast(64)
+        var ov = overviewBitmap
+        var fullRedraw = false
+        if (ov == null || ov.isRecycled || ov.width != targetW || ov.height != targetH) {
+            ov?.recycle()
+            ov = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+            overviewBitmap = ov
+            overviewCanvas = Canvas(ov)
+            fullRedraw = true
+        }
+        if (fullRedraw || overviewDirty) {
+            val c = overviewCanvas ?: Canvas(ov).also { overviewCanvas = it }
+            if (fullRedraw ||
+                overviewDirtyRect.width() >= canvasWidthPx * 0.65f ||
+                overviewDirtyRect.height() >= canvasHeightPx * 0.65f
+            ) {
+                overviewSrcRect.set(0, 0, primary.width, primary.height)
+                overviewDstRect.set(0f, 0f, targetW.toFloat(), targetH.toFloat())
+                c.drawBitmap(primary, overviewSrcRect, overviewDstRect, bitmapPaint)
+            } else {
+                val sx = primary.width.toFloat() / canvasWidthPx.coerceAtLeast(1).toFloat()
+                val sy = primary.height.toFloat() / canvasHeightPx.coerceAtLeast(1).toFloat()
+                val pad = 4
+                val ox0 = ((overviewDirtyRect.left * sx * 0.5f).toInt() - pad).coerceIn(0, targetW)
+                val oy0 = ((overviewDirtyRect.top * sy * 0.5f).toInt() - pad).coerceIn(0, targetH)
+                val ox1 = ((overviewDirtyRect.right * sx * 0.5f).toInt() + pad).coerceIn(0, targetW)
+                val oy1 = ((overviewDirtyRect.bottom * sy * 0.5f).toInt() + pad).coerceIn(0, targetH)
+                if (ox1 > ox0 && oy1 > oy0) {
+                    val sx0 = (ox0 * 2).coerceIn(0, primary.width)
+                    val sy0 = (oy0 * 2).coerceIn(0, primary.height)
+                    val sx1 = (ox1 * 2).coerceIn(0, primary.width)
+                    val sy1 = (oy1 * 2).coerceIn(0, primary.height)
+                    overviewSrcRect.set(sx0, sy0, sx1, sy1)
+                    overviewDstRect.set(ox0.toFloat(), oy0.toFloat(), ox1.toFloat(), oy1.toFloat())
+                    c.save()
+                    c.clipRect(overviewDstRect)
+                    c.drawBitmap(primary, overviewSrcRect, overviewDstRect, bitmapPaint)
+                    c.restore()
+                }
+            }
+            overviewDirty = false
+            overviewDirtyRect.setEmpty()
+        }
+        return ov
     }
 
     fun refreshBackingBitmap() {
@@ -476,7 +643,110 @@ class WriteCanvasBlockView(
         yRuling = info.yRuling
         val bmp = ensureBackingBitmap()
         WriteNativeBridge.nativeRenderToBitmap(nativeHandle, bmp)
+        invalidateOverviewFull()
         notifyViewportUpdated()
+        invalidate()
+    }
+
+    private fun expandBackingBitmapOrRefresh(
+        oldW: Int,
+        oldH: Int,
+        extraDirtyLeft: Float = 0f,
+        extraDirtyTop: Float = 0f,
+        extraDirtyRight: Float = 0f,
+        extraDirtyBottom: Float = 0f
+    ) {
+        if (nativeHandle == 0L) return
+        val newW = canvasWidthPx.coerceAtLeast(100)
+        val newH = canvasHeightPx.coerceAtLeast(100)
+        val existing = backingBitmap
+        val newScale = computeTargetBackingScale(newW, newH)
+        if (existing == null ||
+            newW < oldW ||
+            newH < oldH ||
+            newScale < 0.999f ||
+            existing.width != oldW ||
+            existing.height != oldH
+        ) {
+            refreshBackingBitmap()
+            return
+        }
+        if (newW == oldW && newH == oldH) {
+            if (extraDirtyRight > extraDirtyLeft && extraDirtyBottom > extraDirtyTop) {
+                refreshDirtyRect(extraDirtyLeft, extraDirtyTop, extraDirtyRight, extraDirtyBottom, notifyState = true)
+            } else {
+                notifyViewportUpdated()
+                invalidate()
+            }
+            return
+        }
+
+        backingScale = 1.0f
+        val created = Bitmap.createBitmap(newW, newH, Bitmap.Config.ARGB_8888)
+        val copyCanvas = Canvas(created)
+        copyCanvas.drawBitmap(existing, 0f, 0f, null)
+        existing.recycle()
+        backingBitmap = created
+
+        if (newW > oldW) {
+            WriteNativeBridge.nativeRenderDirtyRectToBitmap(
+                nativeHandle,
+                created,
+                (oldW - 8).coerceAtLeast(0).toFloat(),
+                0f,
+                newW.toFloat(),
+                oldH.toFloat()
+            )
+        }
+        if (newH > oldH) {
+            WriteNativeBridge.nativeRenderDirtyRectToBitmap(
+                nativeHandle,
+                created,
+                0f,
+                (oldH - 8).coerceAtLeast(0).toFloat(),
+                newW.toFloat(),
+                newH.toFloat()
+            )
+        }
+        if (extraDirtyRight > extraDirtyLeft && extraDirtyBottom > extraDirtyTop) {
+            WriteNativeBridge.nativeRenderDirtyRectToBitmap(
+                nativeHandle,
+                created,
+                extraDirtyLeft,
+                extraDirtyTop,
+                extraDirtyRight,
+                extraDirtyBottom
+            )
+        }
+        invalidateOverviewFull()
+        notifyViewportUpdated()
+        invalidate()
+    }
+
+    private fun refreshDirtyRect(
+        left: Float,
+        top: Float,
+        right: Float,
+        bottom: Float,
+        notifyState: Boolean = true
+    ) {
+        if (nativeHandle == 0L) return
+        val existing = backingBitmap
+        val (targetW, targetH) = computeTargetBitmapDims(canvasWidthPx, canvasHeightPx)
+        if (existing == null ||
+            existing.width != targetW ||
+            existing.height != targetH ||
+            right < left ||
+            bottom < top
+        ) {
+            refreshBackingBitmap()
+            return
+        }
+        WriteNativeBridge.nativeRenderDirtyRectToBitmap(nativeHandle, existing, left, top, right, bottom)
+        invalidateOverviewRect(left, top, right, bottom)
+        if (notifyState) {
+            notifyViewportUpdated()
+        }
         invalidate()
     }
 
@@ -489,9 +759,9 @@ class WriteCanvasBlockView(
                 yRuling = yRuling
             )
         }
-        val info = IntArray(10)
+        val info = tmpPageInfo10
         WriteNativeBridge.nativeGetPageInfo(nativeHandle, info)
-        return WritePageSetupState(
+        val state = WritePageSetupState(
             width = info[0],
             height = info[1],
             xRuling = info[2],
@@ -503,18 +773,31 @@ class WriteCanvasBlockView(
             rulingStyle = info[8],
             hasCustomTemplateNodes = info[9] != 0
         )
+        cachedPageSetup = state
+        return state
     }
 
-    fun canUndoNow(): Boolean =
-        nativeHandle != 0L && WriteNativeBridge.nativeCanUndo(nativeHandle)
+    fun canUndoNow(): Boolean {
+        val res = nativeHandle != 0L && WriteNativeBridge.nativeCanUndo(nativeHandle)
+        cachedCanUndo = res
+        return res
+    }
 
-    fun canRedoNow(): Boolean =
-        nativeHandle != 0L && WriteNativeBridge.nativeCanRedo(nativeHandle)
+    fun canRedoNow(): Boolean {
+        val res = nativeHandle != 0L && WriteNativeBridge.nativeCanRedo(nativeHandle)
+        cachedCanRedo = res
+        return res
+    }
 
     fun queryPageSetup(): WritePageSetupState = queryPageSetupState()
 
     private fun notifyViewportUpdated() {
+        lastReportedZoomPct = (zoomScale * 100f).roundToInt()
         onViewportChanged?.invoke(zoomScale, canUndoNow(), canRedoNow(), queryPageSetupState())
+    }
+
+    private fun notifyZoomOnlyUpdated() {
+        onViewportChanged?.invoke(zoomScale, cachedCanUndo, cachedCanRedo, cachedPageSetup)
     }
 
     private fun updateSelectionFromBounds(count: Int, bounds4: FloatArray) {
@@ -532,16 +815,146 @@ class WriteCanvasBlockView(
 
     fun loadFromBase64Svgz(base64: String?) {
         if (base64.isNullOrEmpty() || nativeHandle == 0L) return
+        if (base64 == lastSyncedSvgzBase64) return
         val bytes = Base64.decode(base64, Base64.DEFAULT)
         if (WriteNativeBridge.nativeLoadSvgz(nativeHandle, bytes)) {
+            lastSyncedSvgzBase64 = base64
             refreshBackingBitmap()
         }
     }
 
     fun exportSvgzBase64(): String {
-        if (nativeHandle == 0L) return ""
-        val bytes = WriteNativeBridge.nativeExportSvgz(nativeHandle) ?: return ""
-        return Base64.encodeToString(bytes, Base64.NO_WRAP)
+        val h = nativeHandle
+        if (h == 0L) return ""
+        val bytes = WriteNativeBridge.nativeExportSvgz(h) ?: return ""
+        val encoded = Base64.encodeToString(bytes, Base64.NO_WRAP)
+        lastSyncedSvgzBase64 = encoded
+        return encoded
+    }
+
+    /**
+     * Shares the reference-counted C++ `NativeCanvasSession` and rendered `backingBitmap`
+     * between the inline view and the full-screen zoomed view so opening or closing
+     * a large canvas never parses `.svgz` XML or re-rasterizes on the UI thread.
+     */
+    fun adoptSessionAndBitmapFrom(
+        source: WriteCanvasBlockView,
+        transferBitmapOwnership: Boolean = false
+    ): Boolean {
+        val srcHandle = source.nativeHandle
+        if (!WriteNativeBridge.isNativeLoaded || srcHandle == 0L) return false
+        if (srcHandle != nativeHandle) {
+            WriteNativeBridge.nativeRetainSession(srcHandle)
+            if (nativeHandle != 0L) {
+                WriteNativeBridge.nativeDestroySession(nativeHandle)
+            }
+            nativeHandle = srcHandle
+        }
+
+        adoptedPeer = source
+        source.adoptedPeer = this
+        lastSyncedSvgzBase64 = source.lastSyncedSvgzBase64
+
+        canvasWidthPx = source.canvasWidthPx
+        canvasHeightPx = source.canvasHeightPx
+        xRuling = source.xRuling
+        yRuling = source.yRuling
+        cachedPageSetup = source.cachedPageSetup
+        cachedCanUndo = source.cachedCanUndo
+        cachedCanRedo = source.cachedCanRedo
+        backingScale = source.backingScale
+
+        val srcBmp = source.backingBitmap
+        if (srcBmp != null && !srcBmp.isRecycled) {
+            if (transferBitmapOwnership) {
+                if (backingBitmap !== srcBmp) {
+                    backingBitmap?.recycle()
+                    backingBitmap = srcBmp
+                }
+                source.backingBitmap = null
+
+                val srcOv = source.overviewBitmap
+                if (srcOv != null && !srcOv.isRecycled) {
+                    if (overviewBitmap !== srcOv) {
+                        overviewBitmap?.recycle()
+                        overviewBitmap = srcOv
+                        overviewCanvas = source.overviewCanvas
+                    }
+                    source.overviewBitmap = null
+                    source.overviewCanvas = null
+                    overviewDirty = source.overviewDirty
+                    overviewDirtyRect.set(source.overviewDirtyRect)
+                } else {
+                    invalidateOverviewFull()
+                }
+            } else {
+                val existing = backingBitmap
+                if (existing != null && !existing.isRecycled &&
+                    existing.width == srcBmp.width && existing.height == srcBmp.height
+                ) {
+                    Canvas(existing).drawBitmap(srcBmp, 0f, 0f, null)
+                } else {
+                    existing?.recycle()
+                    backingBitmap = srcBmp.copy(Bitmap.Config.ARGB_8888, true)
+                }
+                invalidateOverviewFull()
+            }
+        } else {
+            refreshBackingBitmap()
+        }
+
+        WriteNativeBridge.nativeClearSelection(nativeHandle)
+        selectionState = WriteSelectionState()
+        onSelectionChanged?.invoke(selectionState)
+
+        WriteNativeBridge.nativeSetPen(
+            nativeHandle,
+            penColorArgb,
+            penWidthPx,
+            pressureSensitive && toolMode == StylusToolMode.PEN,
+            if (toolMode == StylusToolMode.HIGHLIGHTER) WritePenTip.FLAT.nativeCode else penTip.nativeCode,
+            snapToGrid,
+            lineDrawing,
+            penChiselAngle
+        )
+
+        onHeightExpanded(canvasHeightPx)
+        notifyViewportUpdated()
+        invalidate()
+        return true
+    }
+
+    /**
+     * Creates a reference-counted background exporter closure that retains the native
+     * C++ session handle until the export finishes (or is cancelled), so `.svgz`
+     * compression never blocks the UI thread or races with `onDetachedFromWindow()`.
+     */
+    private fun createDeferredSvgzExporter(): (Boolean) -> String {
+        val h = nativeHandle
+        if (h == 0L) return { "" }
+        WriteNativeBridge.nativeRetainSession(h)
+        val released = java.util.concurrent.atomic.AtomicBoolean(false)
+        return { shouldExport ->
+            try {
+                if (shouldExport) {
+                    val bytes = WriteNativeBridge.nativeExportSvgz(h)
+                    if (bytes != null && bytes.isNotEmpty()) {
+                        val encoded = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                        lastSyncedSvgzBase64 = encoded
+                        adoptedPeer?.lastSyncedSvgzBase64 = encoded
+                        encoded
+                    } else {
+                        ""
+                    }
+                } else {
+                    ""
+                }
+            } finally {
+                if (released.compareAndSet(false, true)) {
+                    WriteNativeBridge.nativeDestroySession(h)
+                }
+            }
+        }
     }
 
     fun configureTool(
@@ -557,23 +970,36 @@ class WriteCanvasBlockView(
         if (toolMode != mode && !mode.name.startsWith("SELECT")) {
             clearSelection()
         }
+        val newColorArgb = if (mode == StylusToolMode.HIGHLIGHTER) {
+            (colorArgb and 0x00FFFFFF) or 0x55000000
+        } else {
+            colorArgb or 0xFF000000.toInt()
+        }
+        val newWidthPx = if (mode == StylusToolMode.HIGHLIGHTER) strokeWidth * 4.5f else strokeWidth
+
+        if (toolMode == mode &&
+            penTip == tip &&
+            pressureSensitive == pressure &&
+            snapToGrid == snapGrid &&
+            lineDrawing == straightLine &&
+            penChiselAngle == chiselAngle &&
+            penColorArgb == newColorArgb &&
+            penWidthPx == newWidthPx
+        ) {
+            return
+        }
+
         toolMode = mode
         penTip = tip
         pressureSensitive = pressure
         snapToGrid = snapGrid
         lineDrawing = straightLine
         penChiselAngle = chiselAngle
-        penColorArgb = if (mode == StylusToolMode.HIGHLIGHTER) {
-            (colorArgb and 0x00FFFFFF) or 0x55000000
-        } else {
-            colorArgb or 0xFF000000.toInt()
-        }
-        penWidthPx = if (mode == StylusToolMode.HIGHLIGHTER) strokeWidth * 4.5f else strokeWidth
+        penColorArgb = newColorArgb
+        penWidthPx = newWidthPx
 
-        currentLiveStrokePaint = Paint(currentLiveStrokePaint).apply {
-            color = penColorArgb
-            this.strokeWidth = penWidthPx
-        }
+        currentLiveStrokePaint.color = penColorArgb
+        currentLiveStrokePaint.strokeWidth = penWidthPx
         if (nativeHandle != 0L) {
             WriteNativeBridge.nativeSetPen(
                 nativeHandle,
@@ -599,7 +1025,8 @@ class WriteCanvasBlockView(
         panOffsetX = cx - (cx - panOffsetX) * (next / prev)
         panOffsetY = cy - (cy - panOffsetY) * (next / prev)
         zoomScale = next
-        notifyViewportUpdated()
+        lastReportedZoomPct = (zoomScale * 100f).roundToInt()
+        notifyZoomOnlyUpdated()
         invalidate()
     }
 
@@ -608,7 +1035,8 @@ class WriteCanvasBlockView(
         zoomScale = 1.0f
         panOffsetX = ((width - canvasWidthPx) / 2f).coerceAtLeast(16f)
         panOffsetY = 24f
-        notifyViewportUpdated()
+        lastReportedZoomPct = 100
+        notifyZoomOnlyUpdated()
         invalidate()
     }
 
@@ -618,14 +1046,15 @@ class WriteCanvasBlockView(
         zoomScale = targetScale
         panOffsetX = (width - canvasWidthPx * zoomScale) / 2f
         panOffsetY = 24f
-        notifyViewportUpdated()
+        lastReportedZoomPct = (zoomScale * 100f).roundToInt()
+        notifyZoomOnlyUpdated()
         invalidate()
     }
 
     // Selection Actions (Translate, Scale, Rotate, Copy, Cut, Paste, Duplicate, Restyle, Delete)
     fun selectAllStrokes() {
         if (nativeHandle == 0L) return
-        val bounds = FloatArray(4)
+        val bounds = tmpBounds4
         val count = WriteNativeBridge.nativeSelectAll(nativeHandle, bounds)
         updateSelectionFromBounds(count, bounds)
     }
@@ -641,73 +1070,112 @@ class WriteCanvasBlockView(
 
     fun deleteSelectedStrokes() {
         if (nativeHandle == 0L || !selectionState.hasSelection) return
+        val oldBounds = RectF(selectionState.bounds)
+        val pad = max(penWidthPx, 12f) + 8f
         if (WriteNativeBridge.nativeDeleteSelection(nativeHandle)) {
             clearSelection()
-            refreshBackingBitmap()
-            onStrokeCommitted("<delete-selection/>", canvasWidthPx, canvasHeightPx) { exportSvgzBase64() }
+            refreshDirtyRect(
+                oldBounds.left - pad,
+                oldBounds.top - pad,
+                oldBounds.right + pad,
+                oldBounds.bottom + pad,
+                notifyState = true
+            )
+            onStrokeCommitted("<delete-selection/>", canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
         }
     }
 
     fun duplicateSelectedStrokes() {
         if (nativeHandle == 0L || !selectionState.hasSelection) return
-        val bounds = FloatArray(4)
+        val bounds = tmpBounds4
         val step = if (yRuling > 0) yRuling.toFloat() else 32f
         val count = WriteNativeBridge.nativeDuplicateSelection(nativeHandle, step, step, bounds)
         if (count > 0) {
-            refreshBackingBitmap()
+            val pad = max(penWidthPx, 12f) + 8f
+            refreshDirtyRect(
+                bounds[0] - pad,
+                bounds[1] - pad,
+                bounds[2] + pad,
+                bounds[3] + pad,
+                notifyState = true
+            )
             updateSelectionFromBounds(count, bounds)
-            onStrokeCommitted("<duplicate-selection/>", canvasWidthPx, canvasHeightPx) { exportSvgzBase64() }
+            onStrokeCommitted("<duplicate-selection/>", canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
         }
     }
 
     fun scaleSelectedStrokes(scaleFactor: Float, scaleStrokeWidths: Boolean = true) {
         if (nativeHandle == 0L || !selectionState.hasSelection) return
-        val b = selectionState.bounds
-        val bounds = FloatArray(4)
-        val dims = IntArray(2)
+        val oldBounds = RectF(selectionState.bounds)
+        val oldW = canvasWidthPx
+        val oldH = canvasHeightPx
+        val bounds = tmpBounds4
+        val dims = tmpDims2
         if (WriteNativeBridge.nativeScaleSelection(
                 nativeHandle,
                 scaleFactor,
                 scaleFactor,
-                b.centerX(),
-                b.centerY(),
+                oldBounds.centerX(),
+                oldBounds.centerY(),
                 scaleStrokeWidths,
                 bounds,
                 dims
             )
         ) {
+            if (dims[0] > canvasWidthPx) canvasWidthPx = dims[0]
             if (dims[1] > canvasHeightPx) {
                 canvasHeightPx = dims[1]
                 onHeightExpanded(canvasHeightPx)
             }
-            refreshBackingBitmap()
+            val pad = max(penWidthPx, 12f) + 8f
+            val uLeft = min(oldBounds.left, bounds[0]) - pad
+            val uTop = min(oldBounds.top, bounds[1]) - pad
+            val uRight = max(oldBounds.right, bounds[2]) + pad
+            val uBottom = max(oldBounds.bottom, bounds[3]) + pad
+            if (canvasWidthPx != oldW || canvasHeightPx != oldH) {
+                expandBackingBitmapOrRefresh(oldW, oldH, uLeft, uTop, uRight, uBottom)
+            } else {
+                refreshDirtyRect(uLeft, uTop, uRight, uBottom, notifyState = true)
+            }
             updateSelectionFromBounds(selectionState.count, bounds)
-            onStrokeCommitted("<scale-selection/>", canvasWidthPx, canvasHeightPx) { exportSvgzBase64() }
+            onStrokeCommitted("<scale-selection/>", canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
         }
     }
 
     fun rotateSelectedStrokes(degrees: Float) {
         if (nativeHandle == 0L || !selectionState.hasSelection) return
-        val b = selectionState.bounds
+        val oldBounds = RectF(selectionState.bounds)
+        val oldW = canvasWidthPx
+        val oldH = canvasHeightPx
         val rad = (degrees * PI / 180.0).toFloat()
-        val bounds = FloatArray(4)
-        val dims = IntArray(2)
+        val bounds = tmpBounds4
+        val dims = tmpDims2
         if (WriteNativeBridge.nativeRotateSelection(
                 nativeHandle,
                 rad,
-                b.centerX(),
-                b.centerY(),
+                oldBounds.centerX(),
+                oldBounds.centerY(),
                 bounds,
                 dims
             )
         ) {
+            if (dims[0] > canvasWidthPx) canvasWidthPx = dims[0]
             if (dims[1] > canvasHeightPx) {
                 canvasHeightPx = dims[1]
                 onHeightExpanded(canvasHeightPx)
             }
-            refreshBackingBitmap()
+            val pad = max(penWidthPx, 12f) + 8f
+            val uLeft = min(oldBounds.left, bounds[0]) - pad
+            val uTop = min(oldBounds.top, bounds[1]) - pad
+            val uRight = max(oldBounds.right, bounds[2]) + pad
+            val uBottom = max(oldBounds.bottom, bounds[3]) + pad
+            if (canvasWidthPx != oldW || canvasHeightPx != oldH) {
+                expandBackingBitmapOrRefresh(oldW, oldH, uLeft, uTop, uRight, uBottom)
+            } else {
+                refreshDirtyRect(uLeft, uTop, uRight, uBottom, notifyState = true)
+            }
             updateSelectionFromBounds(selectionState.count, bounds)
-            onStrokeCommitted("<rotate-selection/>", canvasWidthPx, canvasHeightPx) { exportSvgzBase64() }
+            onStrokeCommitted("<rotate-selection/>", canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
         }
     }
 
@@ -731,8 +1199,10 @@ class WriteCanvasBlockView(
 
     fun pasteClipboardStrokes(): Boolean {
         if (nativeHandle == 0L || WriteNativeBridge.clipboardSvgXml.isBlank()) return false
-        val bounds = FloatArray(4)
-        val dims = IntArray(2)
+        val oldW = canvasWidthPx
+        val oldH = canvasHeightPx
+        val bounds = tmpBounds4
+        val dims = tmpDims2
         val step = if (yRuling > 0) yRuling.toFloat() else 32f
         val count = WriteNativeBridge.nativePasteSelectionSvg(
             nativeHandle,
@@ -743,13 +1213,32 @@ class WriteCanvasBlockView(
             dims
         )
         if (count > 0) {
+            if (dims[0] > canvasWidthPx) canvasWidthPx = dims[0]
             if (dims[1] > canvasHeightPx) {
                 canvasHeightPx = dims[1]
                 onHeightExpanded(canvasHeightPx)
             }
-            refreshBackingBitmap()
+            val pad = max(penWidthPx, 12f) + 8f
+            if (canvasWidthPx != oldW || canvasHeightPx != oldH) {
+                expandBackingBitmapOrRefresh(
+                    oldW,
+                    oldH,
+                    bounds[0] - pad,
+                    bounds[1] - pad,
+                    bounds[2] + pad,
+                    bounds[3] + pad
+                )
+            } else {
+                refreshDirtyRect(
+                    bounds[0] - pad,
+                    bounds[1] - pad,
+                    bounds[2] + pad,
+                    bounds[3] + pad,
+                    notifyState = true
+                )
+            }
             updateSelectionFromBounds(count, bounds)
-            onStrokeCommitted("<paste-selection/>", canvasWidthPx, canvasHeightPx) { exportSvgzBase64() }
+            onStrokeCommitted("<paste-selection/>", canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
             return true
         }
         return false
@@ -757,9 +1246,11 @@ class WriteCanvasBlockView(
 
     fun applyCurrentStyleToSelection() {
         if (nativeHandle == 0L || !selectionState.hasSelection) return
+        val b = selectionState.bounds
+        val pad = max(penWidthPx, 16f) + 8f
         if (WriteNativeBridge.nativeRestyleSelection(nativeHandle, penColorArgb, penWidthPx)) {
-            refreshBackingBitmap()
-            onStrokeCommitted("<restyle-selection/>", canvasWidthPx, canvasHeightPx) { exportSvgzBase64() }
+            refreshDirtyRect(b.left - pad, b.top - pad, b.right + pad, b.bottom + pad, notifyState = false)
+            onStrokeCommitted("<restyle-selection/>", canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
         }
     }
 
@@ -789,7 +1280,7 @@ class WriteCanvasBlockView(
         ) {
             refreshBackingBitmap()
             onHeightExpanded(canvasHeightPx)
-            onStrokeCommitted("<page-setup/>", canvasWidthPx, canvasHeightPx) { exportSvgzBase64() }
+            onStrokeCommitted("<page-setup/>", canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
         }
     }
 
@@ -798,7 +1289,7 @@ class WriteCanvasBlockView(
         if (WriteNativeBridge.nativeLockContentAsTemplate(nativeHandle)) {
             clearSelection()
             refreshBackingBitmap()
-            onStrokeCommitted("<lock-template/>", canvasWidthPx, canvasHeightPx) { exportSvgzBase64() }
+            onStrokeCommitted("<lock-template/>", canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
             return true
         }
         return false
@@ -808,7 +1299,7 @@ class WriteCanvasBlockView(
         if (nativeHandle == 0L) return false
         if (WriteNativeBridge.nativeUnlockTemplateToContent(nativeHandle)) {
             refreshBackingBitmap()
-            onStrokeCommitted("<unlock-template/>", canvasWidthPx, canvasHeightPx) { exportSvgzBase64() }
+            onStrokeCommitted("<unlock-template/>", canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
             return true
         }
         return false
@@ -818,7 +1309,7 @@ class WriteCanvasBlockView(
         if (nativeHandle == 0L) return false
         if (WriteNativeBridge.nativeClearCustomTemplate(nativeHandle)) {
             refreshBackingBitmap()
-            onStrokeCommitted("<clear-template/>", canvasWidthPx, canvasHeightPx) { exportSvgzBase64() }
+            onStrokeCommitted("<clear-template/>", canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
             return true
         }
         return false
@@ -832,9 +1323,12 @@ class WriteCanvasBlockView(
             if (!asBackground && bounds[2] > bounds[0]) {
                 updateSelectionFromBounds(1, bounds)
             }
-            onStrokeCommitted("<insert-image bg=\"$asBackground\"/>", canvasWidthPx, canvasHeightPx) {
-                exportSvgzBase64()
-            }
+            onStrokeCommitted(
+                "<insert-image bg=\"$asBackground\"/>",
+                canvasWidthPx,
+                canvasHeightPx,
+                createDeferredSvgzExporter()
+            )
             return true
         }
         return false
@@ -859,7 +1353,7 @@ class WriteCanvasBlockView(
                 canvasHeightPx = dims[1]
                 onHeightExpanded(canvasHeightPx)
             }
-            onStrokeCommitted("<undo/>", canvasWidthPx, canvasHeightPx) { exportSvgzBase64() }
+            onStrokeCommitted("<undo/>", canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
             return true
         } else if (fallbackPaths.isNotEmpty()) {
             fallbackPaths.removeLast()
@@ -878,7 +1372,7 @@ class WriteCanvasBlockView(
                 canvasHeightPx = dims[1]
                 onHeightExpanded(canvasHeightPx)
             }
-            onStrokeCommitted("<redo/>", canvasWidthPx, canvasHeightPx) { exportSvgzBase64() }
+            onStrokeCommitted("<redo/>", canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
             return true
         }
         return false
@@ -889,18 +1383,28 @@ class WriteCanvasBlockView(
     }
 
     fun resizeCanvasDimensions(newWidthPx: Int, newHeightPx: Int) {
+        val oldW = canvasWidthPx
+        val oldH = canvasHeightPx
         val clampedW = newWidthPx.coerceIn(400, 6000)
         val clampedH = newHeightPx.coerceIn(300, 8000)
+        if (clampedW == oldW && clampedH == oldH) return
         canvasWidthPx = clampedW
         canvasHeightPx = clampedH
         if (nativeHandle != 0L) {
             WriteNativeBridge.nativeResizeCanvas(nativeHandle, clampedW, clampedH)
-            refreshBackingBitmap()
+            if (clampedW >= oldW && clampedH >= oldH) {
+                expandBackingBitmapOrRefresh(oldW, oldH)
+            } else {
+                refreshBackingBitmap()
+            }
         }
         onHeightExpanded(clampedH)
-        onStrokeCommitted("<resize width=\"$clampedW\" height=\"$clampedH\"/>", canvasWidthPx, canvasHeightPx) {
-            exportSvgzBase64()
-        }
+        onStrokeCommitted(
+            "<resize width=\"$clampedW\" height=\"$clampedH\"/>",
+            canvasWidthPx,
+            canvasHeightPx,
+            createDeferredSvgzExporter()
+        )
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -919,7 +1423,9 @@ class WriteCanvasBlockView(
 
     private fun hitTestSelectionTransform(cx: Float, cy: Float): SelectionTransformInteraction {
         if (!selectionState.hasSelection) return SelectionTransformInteraction.NONE
-        val b = RectF(selectionState.bounds).apply { inset(-6f, -6f) }
+        val b = tmpHitRect
+        b.set(selectionState.bounds)
+        b.inset(-6f, -6f)
         val hitRadius = 22f / zoomScale.coerceAtLeast(0.5f)
 
         // 1. Check top rotation handle stem (located 28px above top-center of selection box)
@@ -932,23 +1438,30 @@ class WriteCanvasBlockView(
         }
 
         // 2. Check 4 corner scale handles (pivot is the opposite corner)
-        val corners = listOf(
-            Triple(b.left, b.top, b.right to b.bottom),
-            Triple(b.right, b.top, b.left to b.bottom),
-            Triple(b.left, b.bottom, b.right to b.top),
-            Triple(b.right, b.bottom, b.left to b.top)
-        )
-        for ((hx, hy, oppositePivot) in corners) {
-            if (hypot(cx - hx, cy - hy) <= hitRadius) {
-                selPivotX = oppositePivot.first
-                selPivotY = oppositePivot.second
-                return SelectionTransformInteraction.SCALE_CORNER
-            }
+        if (hypot(cx - b.left, cy - b.top) <= hitRadius) {
+            selPivotX = b.right
+            selPivotY = b.bottom
+            return SelectionTransformInteraction.SCALE_CORNER
+        }
+        if (hypot(cx - b.right, cy - b.top) <= hitRadius) {
+            selPivotX = b.left
+            selPivotY = b.bottom
+            return SelectionTransformInteraction.SCALE_CORNER
+        }
+        if (hypot(cx - b.left, cy - b.bottom) <= hitRadius) {
+            selPivotX = b.right
+            selPivotY = b.top
+            return SelectionTransformInteraction.SCALE_CORNER
+        }
+        if (hypot(cx - b.right, cy - b.bottom) <= hitRadius) {
+            selPivotX = b.left
+            selPivotY = b.top
+            return SelectionTransformInteraction.SCALE_CORNER
         }
 
         // 3. Check inside selection box for translation
-        val paddedBounds = RectF(b).apply { inset(-14f, -14f) }
-        if (paddedBounds.contains(cx, cy)) {
+        b.inset(-14f, -14f)
+        if (b.contains(cx, cy)) {
             return SelectionTransformInteraction.TRANSLATE
         }
         return SelectionTransformInteraction.NONE
@@ -1003,11 +1516,16 @@ class WriteCanvasBlockView(
             toolType == MotionEvent.TOOL_TYPE_MOUSE ||
             isStylusButton
 
+        if (action == MotionEvent.ACTION_DOWN && isStylusOrMouse) {
+            requestUnbufferedDispatch(event)
+        }
+
         // If the user clicks the stylus eraser button mid-stroke, cancel drawing immediately
         if (isHardwareEraser && activeLiveStrokePath != null) {
             activeLiveStrokePath = null
+            predictedTipPath.reset()
             if (nativeHandle != 0L) {
-                WriteNativeBridge.nativeEndStroke(nativeHandle, IntArray(2))
+                WriteNativeBridge.nativeEndStroke(nativeHandle, tmpDims2)
             }
         }
 
@@ -1100,8 +1618,11 @@ class WriteCanvasBlockView(
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                         val finishedMode = activeSelTransform
                         activeSelTransform = SelectionTransformInteraction.NONE
-                        val bounds = FloatArray(4)
-                        val dims = IntArray(2)
+                        val oldBounds = RectF(selectionState.bounds)
+                        val oldW = canvasWidthPx
+                        val oldH = canvasHeightPx
+                        val bounds = tmpBounds4
+                        val dims = tmpDims2
                         var changed = false
 
                         if (nativeHandle != 0L) {
@@ -1157,11 +1678,18 @@ class WriteCanvasBlockView(
                                 canvasHeightPx = dims[1]
                                 onHeightExpanded(canvasHeightPx)
                             }
-                            refreshBackingBitmap()
-                            updateSelectionFromBounds(selectionState.count, bounds)
-                            onStrokeCommitted("<transform-selection/>", canvasWidthPx, canvasHeightPx) {
-                                exportSvgzBase64()
+                            val pad = max(penWidthPx, 12f) + 8f
+                            val uLeft = min(oldBounds.left, bounds[0]) - pad
+                            val uTop = min(oldBounds.top, bounds[1]) - pad
+                            val uRight = max(oldBounds.right, bounds[2]) + pad
+                            val uBottom = max(oldBounds.bottom, bounds[3]) + pad
+                            if (canvasWidthPx != oldW || canvasHeightPx != oldH) {
+                                expandBackingBitmapOrRefresh(oldW, oldH, uLeft, uTop, uRight, uBottom)
+                            } else {
+                                refreshDirtyRect(uLeft, uTop, uRight, uBottom, notifyState = true)
                             }
+                            updateSelectionFromBounds(selectionState.count, bounds)
+                            onStrokeCommitted("<transform-selection/>", canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
                         } else {
                             invalidate()
                         }
@@ -1185,39 +1713,111 @@ class WriteCanvasBlockView(
             } else {
                 toolMode
             }
+            val eraseModeCode = when (effectiveMode) {
+                StylusToolMode.ERASER_RULED -> 1
+                StylusToolMode.ERASER_FREE -> 2
+                else -> 0
+            }
+            val eraseRadius = if (effectiveMode == StylusToolMode.ERASER_FREE) 18f else 22f
+
             when (action) {
                 MotionEvent.ACTION_DOWN -> {
                     freeEraseLastX = cx
                     freeEraseLastY = cy
-                    val erased = if (nativeHandle != 0L) {
-                        when (effectiveMode) {
-                            StylusToolMode.ERASER_RULED -> WriteNativeBridge.nativeEraseRuledLineAt(nativeHandle, cy)
-                            StylusToolMode.ERASER_FREE -> WriteNativeBridge.nativeEraseFreeSegment(
-                                nativeHandle, cx, cy, cx, cy, 18f
+                    anyErasedInGesture = false
+                    if (nativeHandle != 0L) {
+                        val erased = WriteNativeBridge.nativeEraseSegmentDirty(
+                            nativeHandle,
+                            cx,
+                            cy,
+                            cx,
+                            cy,
+                            eraseRadius,
+                            eraseModeCode,
+                            tmpDirty4
+                        )
+                        if (erased) {
+                            anyErasedInGesture = true
+                            refreshDirtyRect(
+                                tmpDirty4[0],
+                                tmpDirty4[1],
+                                tmpDirty4[2],
+                                tmpDirty4[3],
+                                notifyState = false
                             )
-                            else -> WriteNativeBridge.nativeEraseAt(nativeHandle, cx, cy, 22f)
                         }
-                    } else false
-                    if (erased) refreshBackingBitmap()
+                    }
                     return true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    val erased = if (nativeHandle != 0L) {
-                        when (effectiveMode) {
-                            StylusToolMode.ERASER_RULED -> WriteNativeBridge.nativeEraseRuledLineAt(nativeHandle, cy)
-                            StylusToolMode.ERASER_FREE -> WriteNativeBridge.nativeEraseFreeSegment(
-                                nativeHandle, freeEraseLastX, freeEraseLastY, cx, cy, 18f
-                            )
-                            else -> WriteNativeBridge.nativeEraseAt(nativeHandle, cx, cy, 22f)
+                    if (nativeHandle != 0L) {
+                        var batchErased = false
+                        var dLeft = 1e9f
+                        var dTop = 1e9f
+                        var dRight = -1e9f
+                        var dBottom = -1e9f
+
+                        val histSize = event.historySize
+                        for (h in 0 until histSize) {
+                            val hx = screenToCanvasX(event.getHistoricalX(h))
+                            val hy = screenToCanvasY(event.getHistoricalY(h))
+                            if (WriteNativeBridge.nativeEraseSegmentDirty(
+                                    nativeHandle,
+                                    freeEraseLastX,
+                                    freeEraseLastY,
+                                    hx,
+                                    hy,
+                                    eraseRadius,
+                                    eraseModeCode,
+                                    tmpDirty4
+                                )
+                            ) {
+                                batchErased = true
+                                dLeft = min(dLeft, tmpDirty4[0])
+                                dTop = min(dTop, tmpDirty4[1])
+                                dRight = max(dRight, tmpDirty4[2])
+                                dBottom = max(dBottom, tmpDirty4[3])
+                            }
+                            freeEraseLastX = hx
+                            freeEraseLastY = hy
                         }
-                    } else false
-                    freeEraseLastX = cx
-                    freeEraseLastY = cy
-                    if (erased) refreshBackingBitmap()
+
+                        if (WriteNativeBridge.nativeEraseSegmentDirty(
+                                nativeHandle,
+                                freeEraseLastX,
+                                freeEraseLastY,
+                                cx,
+                                cy,
+                                eraseRadius,
+                                eraseModeCode,
+                                tmpDirty4
+                            )
+                        ) {
+                            batchErased = true
+                            dLeft = min(dLeft, tmpDirty4[0])
+                            dTop = min(dTop, tmpDirty4[1])
+                            dRight = max(dRight, tmpDirty4[2])
+                            dBottom = max(dBottom, tmpDirty4[3])
+                        }
+                        freeEraseLastX = cx
+                        freeEraseLastY = cy
+
+                        if (batchErased) {
+                            anyErasedInGesture = true
+                            refreshDirtyRect(dLeft, dTop, dRight, dBottom, notifyState = false)
+                        }
+                    } else {
+                        freeEraseLastX = cx
+                        freeEraseLastY = cy
+                    }
                     return true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    onStrokeCommitted("<erase/>", canvasWidthPx, canvasHeightPx) { exportSvgzBase64() }
+                    if (anyErasedInGesture) {
+                        anyErasedInGesture = false
+                        notifyViewportUpdated()
+                        onStrokeCommitted("<erase/>", canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
+                    }
                     return true
                 }
             }
@@ -1257,7 +1857,7 @@ class WriteCanvasBlockView(
                     return true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    val bounds = FloatArray(4)
+                    val bounds = tmpBounds4
                     var count = 0
                     if (nativeHandle != 0L) {
                         when (toolMode) {
@@ -1340,7 +1940,7 @@ class WriteCanvasBlockView(
                     activeInsertSpaceCurrentX = null
                     activeInsertSpaceCurrentY = null
                     if (startX != null && startY != null && endX != null && endY != null && nativeHandle != 0L) {
-                        val dims = IntArray(2)
+                        val dims = tmpDims2
                         val applied = when (toolMode) {
                             StylusToolMode.INSERT_SPACE_HORZ -> {
                                 WriteNativeBridge.nativeInsertHorizontalSpace(
@@ -1381,9 +1981,7 @@ class WriteCanvasBlockView(
                                 onHeightExpanded(canvasHeightPx)
                             }
                             refreshBackingBitmap()
-                            onStrokeCommitted("<insert-space/>", canvasWidthPx, canvasHeightPx) {
-                                exportSvgzBase64()
-                            }
+                            onStrokeCommitted("<insert-space/>", canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
                         }
                     }
                     invalidate()
@@ -1394,12 +1992,21 @@ class WriteCanvasBlockView(
         }
 
         // 5. Standard Pen / Highlighter / Line-Drawing / Grid-Snapped Drawing
-        val (snappedX, snappedY) = snapCoordIfEnabled(cx, cy)
+        val snappedX = snapX(cx)
+        val snappedY = snapY(cy)
         when (action) {
             MotionEvent.ACTION_DOWN -> {
                 liveStrokeStartX = snappedX
                 liveStrokeStartY = snappedY
-                activeLiveStrokePath = Path().apply { moveTo(snappedX, snappedY) }
+                liveStrokeLastX = snappedX
+                liveStrokeLastY = snappedY
+                liveStrokeLastTimeMs = ts
+                liveStrokeVelX = 0f
+                liveStrokeVelY = 0f
+                reusableLiveStrokePath.reset()
+                reusableLiveStrokePath.moveTo(snappedX, snappedY)
+                predictedTipPath.reset()
+                activeLiveStrokePath = reusableLiveStrokePath
                 if (nativeHandle != 0L) {
                     WriteNativeBridge.nativeBeginStroke(nativeHandle, snappedX, snappedY, pressure, tiltX, 0f, ts)
                 }
@@ -1409,29 +2016,87 @@ class WriteCanvasBlockView(
 
             MotionEvent.ACTION_MOVE -> {
                 if (lineDrawing) {
-                    activeLiveStrokePath = Path().apply {
-                        moveTo(liveStrokeStartX, liveStrokeStartY)
-                        lineTo(snappedX, snappedY)
-                    }
+                    reusableLiveStrokePath.reset()
+                    reusableLiveStrokePath.moveTo(liveStrokeStartX, liveStrokeStartY)
+                    reusableLiveStrokePath.lineTo(snappedX, snappedY)
+                    predictedTipPath.reset()
+                    activeLiveStrokePath = reusableLiveStrokePath
                     if (nativeHandle != 0L) {
                         WriteNativeBridge.nativeMoveStroke(nativeHandle, snappedX, snappedY, pressure, tiltX, 0f, ts)
                     }
                 } else {
-                    for (h in 0 until event.historySize) {
-                        val (hx, hy) = snapCoordIfEnabled(
-                            screenToCanvasX(event.getHistoricalX(h)),
-                            screenToCanvasY(event.getHistoricalY(h))
-                        )
-                        val hp = event.getHistoricalPressure(h)
-                        val hts = event.getHistoricalEventTime(h).toDouble()
-                        activeLiveStrokePath?.lineTo(hx, hy)
-                        if (nativeHandle != 0L) {
-                            WriteNativeBridge.nativeMoveStroke(nativeHandle, hx, hy, hp, tiltX, 0f, hts)
-                        }
+                    val histSize = event.historySize
+                    val totalPts = histSize + 1
+                    if (strokeBatchBuf.size < totalPts * 6) {
+                        strokeBatchBuf = FloatArray(max(totalPts * 6, strokeBatchBuf.size * 2))
                     }
-                    activeLiveStrokePath?.lineTo(snappedX, snappedY)
+                    val buf = strokeBatchBuf
+
+                    for (h in 0 until histSize) {
+                        val hx = snapX(screenToCanvasX(event.getHistoricalX(h)))
+                        val hy = snapY(screenToCanvasY(event.getHistoricalY(h)))
+                        val hp = event.getHistoricalPressure(h).coerceIn(0.05f, 1.0f)
+                        val hts = event.getHistoricalEventTime(h).toDouble()
+
+                        val midX = (liveStrokeLastX + hx) * 0.5f
+                        val midY = (liveStrokeLastY + hy) * 0.5f
+                        reusableLiveStrokePath.quadTo(liveStrokeLastX, liveStrokeLastY, midX, midY)
+
+                        if (hts > liveStrokeLastTimeMs) {
+                            val dt = (hts - liveStrokeLastTimeMs).toFloat().coerceAtLeast(1f)
+                            liveStrokeVelX = liveStrokeVelX * 0.35f + ((hx - liveStrokeLastX) / dt) * 0.65f
+                            liveStrokeVelY = liveStrokeVelY * 0.35f + ((hy - liveStrokeLastY) / dt) * 0.65f
+                            liveStrokeLastTimeMs = hts
+                        }
+                        liveStrokeLastX = hx
+                        liveStrokeLastY = hy
+
+                        val base = h * 6
+                        buf[base] = hx
+                        buf[base + 1] = hy
+                        buf[base + 2] = hp
+                        buf[base + 3] = tiltX
+                        buf[base + 4] = 0f
+                        buf[base + 5] = hts.toFloat()
+                    }
+
+                    val midX = (liveStrokeLastX + snappedX) * 0.5f
+                    val midY = (liveStrokeLastY + snappedY) * 0.5f
+                    reusableLiveStrokePath.quadTo(liveStrokeLastX, liveStrokeLastY, midX, midY)
+
+                    if (ts > liveStrokeLastTimeMs) {
+                        val dt = (ts - liveStrokeLastTimeMs).toFloat().coerceAtLeast(1f)
+                        liveStrokeVelX = liveStrokeVelX * 0.35f + ((snappedX - liveStrokeLastX) / dt) * 0.65f
+                        liveStrokeVelY = liveStrokeVelY * 0.35f + ((snappedY - liveStrokeLastY) / dt) * 0.65f
+                        liveStrokeLastTimeMs = ts
+                    }
+                    liveStrokeLastX = snappedX
+                    liveStrokeLastY = snappedY
+
+                    // Short velocity-extrapolated tip prediction (~8ms lookahead, clamped to 18px)
+                    predictedTipPath.reset()
+                    predictedTipPath.moveTo(midX, midY)
+                    val rawDx = liveStrokeVelX * 8f
+                    val rawDy = liveStrokeVelY * 8f
+                    val dist = hypot(rawDx, rawDy)
+                    val clampScale = if (dist > 18f) 18f / dist else 1f
+                    predictedTipPath.quadTo(
+                        snappedX,
+                        snappedY,
+                        snappedX + rawDx * clampScale,
+                        snappedY + rawDy * clampScale
+                    )
+
+                    val lastBase = histSize * 6
+                    buf[lastBase] = snappedX
+                    buf[lastBase + 1] = snappedY
+                    buf[lastBase + 2] = pressure
+                    buf[lastBase + 3] = tiltX
+                    buf[lastBase + 4] = 0f
+                    buf[lastBase + 5] = ts.toFloat()
+
                     if (nativeHandle != 0L) {
-                        WriteNativeBridge.nativeMoveStroke(nativeHandle, snappedX, snappedY, pressure, tiltX, 0f, ts)
+                        WriteNativeBridge.nativeMoveStrokeBatch(nativeHandle, buf, totalPts)
                     }
                 }
                 invalidate()
@@ -1441,36 +2106,60 @@ class WriteCanvasBlockView(
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 activeLiveStrokePath?.let { finished ->
                     if (nativeHandle == 0L) {
-                        fallbackPaths.add(finished to Paint(currentLiveStrokePaint))
+                        fallbackPaths.add(Path(finished) to Paint(currentLiveStrokePaint))
                     }
                 }
                 activeLiveStrokePath = null
+                predictedTipPath.reset()
 
-                val dims = IntArray(2) { 0 }
+                val dims = tmpDimsAndDirty6
+                dims.fill(0)
                 val pathXml = if (nativeHandle != 0L) {
                     WriteNativeBridge.nativeEndStroke(nativeHandle, dims)
                 } else {
                     "<path class=\"ug-path\" />"
                 }
 
+                val oldW = canvasWidthPx
+                val oldH = canvasHeightPx
+                var sizeExpanded = false
                 if (dims[0] > canvasWidthPx) {
                     canvasWidthPx = dims[0]
+                    sizeExpanded = true
                 }
                 val newHeight = if (dims[1] > 0) dims[1] else canvasHeightPx
                 if (newHeight > canvasHeightPx) {
                     canvasHeightPx = newHeight
+                    sizeExpanded = true
                     onHeightExpanded(newHeight)
                 }
 
                 if (nativeHandle != 0L) {
-                    refreshBackingBitmap()
+                    if (!sizeExpanded && dims[4] >= dims[2] && dims[5] >= dims[3]) {
+                        refreshDirtyRect(
+                            dims[2].toFloat(),
+                            dims[3].toFloat(),
+                            dims[4].toFloat(),
+                            dims[5].toFloat(),
+                            notifyState = true
+                        )
+                    } else if (sizeExpanded && dims[4] >= dims[2] && dims[5] >= dims[3]) {
+                        expandBackingBitmapOrRefresh(
+                            oldW,
+                            oldH,
+                            dims[2].toFloat(),
+                            dims[3].toFloat(),
+                            dims[4].toFloat(),
+                            dims[5].toFloat()
+                        )
+                    } else {
+                        refreshBackingBitmap()
+                    }
                 } else {
                     invalidate()
                 }
 
-                onStrokeCommitted(pathXml, canvasWidthPx, canvasHeightPx) {
-                    exportSvgzBase64()
-                }
+                onStrokeCommitted(pathXml, canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
                 return true
             }
         }
@@ -1496,7 +2185,17 @@ class WriteCanvasBlockView(
 
         val bmp = backingBitmap
         if (bmp != null && nativeHandle != 0L) {
-            canvas.drawBitmap(bmp, 0f, 0f, bitmapPaint)
+            val drawBmp = if (isZoomedMode && zoomScale <= 0.6f) {
+                ensureOverviewBitmapIfNeeded() ?: bmp
+            } else {
+                bmp
+            }
+            if (drawBmp.width == canvasWidthPx && drawBmp.height == canvasHeightPx) {
+                canvas.drawBitmap(drawBmp, 0f, 0f, bitmapPaint)
+            } else {
+                dstPageRect.set(0f, 0f, canvasWidthPx.toFloat(), canvasHeightPx.toFloat())
+                canvas.drawBitmap(drawBmp, null, dstPageRect, bitmapPaint)
+            }
         } else {
             canvas.drawRect(0f, 0f, canvasWidthPx.toFloat(), canvasHeightPx.toFloat(), paperPaint)
             if (yRuling > 0) {
@@ -1518,13 +2217,19 @@ class WriteCanvasBlockView(
             }
         }
 
-        // Active live stroke preview
-        activeLiveStrokePath?.let { canvas.drawPath(it, currentLiveStrokePaint) }
+        // Active live stroke preview + velocity-predicted tip
+        activeLiveStrokePath?.let {
+            canvas.drawPath(it, currentLiveStrokePaint)
+            if (!predictedTipPath.isEmpty) {
+                canvas.drawPath(predictedTipPath, currentLiveStrokePaint)
+            }
+        }
 
         // Active Selection Bounding Box + 4 Scale Corner Handles + Top Rotation Handle
         if (selectionState.hasSelection) {
             canvas.save()
-            val b = RectF(selectionState.bounds)
+            val b = tmpDrawRect
+            b.set(selectionState.bounds)
             b.offset(selAccumulatedDx, selAccumulatedDy)
             b.inset(-6f, -6f)
 
@@ -1632,11 +2337,17 @@ class WriteCanvasBlockView(
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
+        if (adoptedPeer?.adoptedPeer === this) {
+            adoptedPeer?.adoptedPeer = null
+        }
         if (nativeHandle != 0L) {
             WriteNativeBridge.nativeDestroySession(nativeHandle)
             nativeHandle = 0L
         }
         backingBitmap?.recycle()
         backingBitmap = null
+        overviewBitmap?.recycle()
+        overviewBitmap = null
+        overviewCanvas = null
     }
 }

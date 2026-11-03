@@ -18,7 +18,8 @@ android {
 
         externalNativeBuild {
             cmake {
-                cppFlags += "-std=c++17 -O2"
+                cFlags += "-O3 -DNDEBUG -ffast-math -fno-math-errno"
+                cppFlags += "-std=c++17 -O3 -DNDEBUG -ffast-math -fno-math-errno"
                 abiFilters += listOf("arm64-v8a")
             }
         }

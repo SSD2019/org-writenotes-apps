@@ -1385,6 +1385,7 @@ fun WriteZoomedEditorOverlay(
     nodeId: String,
     block: OrgBlock.InkCanvasBlock,
     syncClient: EmacsSyncClient,
+    sourceInlineView: WriteCanvasBlockView? = null,
     onCloseZoom: (updatedWidth: Int, updatedHeight: Int) -> Unit
 ) {
     var canvasViewRef by remember(block.blockId) { mutableStateOf<WriteCanvasBlockView?>(null) }
@@ -1523,7 +1524,13 @@ fun WriteZoomedEditorOverlay(
             onPasteClipboard = {
                 canvasViewRef?.pasteClipboardStrokes()
             },
-            onZoomOrCloseFullScreen = { onCloseZoom(pageSetup.width, pageSetup.height) },
+            onZoomOrCloseFullScreen = {
+                val zoomedView = canvasViewRef
+                if (sourceInlineView != null && zoomedView != null) {
+                    sourceInlineView.adoptSessionAndBitmapFrom(zoomedView, transferBitmapOwnership = true)
+                }
+                onCloseZoom(pageSetup.width, pageSetup.height)
+            },
             onSelectToolMode = { newMode, newColor, newWidth, newTip, eraseDef, selectDef, insDef ->
                 activeMode = newMode
                 selectedColor = newColor
@@ -1568,6 +1575,7 @@ fun WriteZoomedEditorOverlay(
                         xRuling = block.xRuling,
                         yRuling = block.yRuling,
                         isZoomedMode = true,
+                        adoptFromView = sourceInlineView,
                         onStrokeCommitted = { pathXml, w, h, exportSvgzBase64 ->
                             syncClient.streamStrokeAndScheduleCommit(
                                 nodeId = nodeId,
@@ -1592,7 +1600,13 @@ fun WriteZoomedEditorOverlay(
                         }
                     ).apply {
                         singleTouchPanInZoomedMode = singleTouchPan
-                        loadFromBase64Svgz(block.svgzBase64)
+                        if (sourceInlineView == null) {
+                            loadFromBase64Svgz(block.svgzBase64)
+                        } else {
+                            canUndo = canUndoNow()
+                            canRedo = canRedoNow()
+                            pageSetup = queryPageSetupState()
+                        }
                         configureTool(
                             activeMode,
                             selectedColor,

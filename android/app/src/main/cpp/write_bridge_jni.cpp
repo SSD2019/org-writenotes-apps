@@ -117,6 +117,16 @@ NativeCanvasSession::NativeCanvasSession(int width, int height, int xRuling, int
 
 NativeCanvasSession::~NativeCanvasSession() = default;
 
+void NativeCanvasSession::retain() {
+    m_refCount.fetch_add(1, std::memory_order_relaxed);
+}
+
+void NativeCanvasSession::release() {
+    if (m_refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        delete this;
+    }
+}
+
 void NativeCanvasSession::detectRulingStyleFromLoadedPage() {
     if (!m_page || !m_page->contentNode) {
         m_rulingStyle = RULING_STANDARD;
@@ -191,54 +201,91 @@ void NativeCanvasSession::rebuildProceduralRuleLayer() {
     newRuleNode->addChild(bgRect);
 
     if (m_rulingStyle == RULING_DOTTED) {
-        // Dot Grid: crisp circular/diamond dots at each (xStep, yStep) intersection
-        Path2D dotsPath;
+        // Dot Grid: crisp circular/diamond dots partitioned into vertical bands for fast dirty-rect culling
         const Dim r = 1.6f;
-        for (Dim y = yStep; y < h; y += yStep) {
-            for (Dim x = xStep; x < w; x += xStep) {
-                dotsPath.moveTo(Point(x - r, y));
-                dotsPath.lineTo(Point(x + r, y));
-                dotsPath.moveTo(Point(x, y - r));
-                dotsPath.lineTo(Point(x, y + r));
+        const Dim bandHeight = 512.0f;
+        for (Dim bandTop = 0; bandTop < h; bandTop += bandHeight) {
+            const Dim bandBottom = std::min(h, bandTop + bandHeight);
+            Path2D dotsPath;
+            Dim firstY = std::max(yStep, std::ceil(bandTop / yStep) * yStep);
+            if (firstY < bandTop && firstY > 0) firstY += yStep;
+            for (Dim y = firstY; y < bandBottom; y += yStep) {
+                for (Dim x = xStep; x < w; x += xStep) {
+                    dotsPath.moveTo(Point(x - r, y));
+                    dotsPath.lineTo(Point(x + r, y));
+                    dotsPath.moveTo(Point(x, y - r));
+                    dotsPath.lineTo(Point(x, y + r));
+                }
+            }
+            if (!dotsPath.empty()) {
+                auto* dotNode = new SvgPath(dotsPath);
+                dotNode->setAttr<float>("stroke-width", 2.2f);
+                dotNode->setAttr<int>("stroke-linecap", Painter::RoundCap);
+                newRuleNode->addChild(dotNode);
             }
         }
-        auto* dotNode = new SvgPath(dotsPath);
-        dotNode->setAttr<float>("stroke-width", 2.2f);
-        dotNode->setAttr<int>("stroke-linecap", Painter::RoundCap);
-        newRuleNode->addChild(dotNode);
     } else if (m_rulingStyle == RULING_ENGINEER_GRID) {
-        // Engineering Graph Paper: subtle minor grid (1x) + bold major grid (5x)
-        Path2D minorPath;
-        Path2D majorPath;
-        int rowIdx = 1;
-        for (Dim y = yStep; y < h; y += yStep, ++rowIdx) {
-            if (rowIdx % 5 == 0) {
-                majorPath.addLine(Point(0, y), Point(w, y));
-            } else {
-                minorPath.addLine(Point(0, y), Point(w, y));
-            }
-        }
-        int colIdx = 1;
-        for (Dim x = xStep; x < w; x += xStep, ++colIdx) {
-            if (colIdx % 5 == 0) {
-                majorPath.addLine(Point(x, 0), Point(x, h));
-            } else {
-                minorPath.addLine(Point(x, 0), Point(x, h));
-            }
-        }
-        auto* minorNode = new SvgPath(minorPath);
+        // Engineering Graph Paper: subtle minor grid (1x) + bold major grid (5x), partitioned into bands
         Color minorColor = m_page->props.ruleColor;
         minorColor.setAlphaF(0.35f);
-        setSvgStrokeColor(minorNode, minorColor);
-        minorNode->setAttr<float>("stroke-width", 0.8f);
-        newRuleNode->addChild(minorNode);
-
-        auto* majorNode = new SvgPath(majorPath);
         Color majorColor = m_page->props.ruleColor;
         majorColor.setAlphaF(0.85f);
-        setSvgStrokeColor(majorNode, majorColor);
-        majorNode->setAttr<float>("stroke-width", 1.6f);
-        newRuleNode->addChild(majorNode);
+
+        const Dim bandHeight = 512.0f;
+        int rowIdx = 1;
+        Dim y = yStep;
+        while (y < h) {
+            const Dim bandLimit = y + bandHeight;
+            Path2D minorRows;
+            Path2D majorRows;
+            for (; y < h && y < bandLimit; y += yStep, ++rowIdx) {
+                if (rowIdx % 5 == 0) {
+                    majorRows.addLine(Point(0, y), Point(w, y));
+                } else {
+                    minorRows.addLine(Point(0, y), Point(w, y));
+                }
+            }
+            if (!minorRows.empty()) {
+                auto* minorNode = new SvgPath(minorRows);
+                setSvgStrokeColor(minorNode, minorColor);
+                minorNode->setAttr<float>("stroke-width", 0.8f);
+                newRuleNode->addChild(minorNode);
+            }
+            if (!majorRows.empty()) {
+                auto* majorNode = new SvgPath(majorRows);
+                setSvgStrokeColor(majorNode, majorColor);
+                majorNode->setAttr<float>("stroke-width", 1.6f);
+                newRuleNode->addChild(majorNode);
+            }
+        }
+
+        const Dim colBandWidth = 512.0f;
+        int colIdx = 1;
+        Dim x = xStep;
+        while (x < w) {
+            const Dim colLimit = x + colBandWidth;
+            Path2D minorCols;
+            Path2D majorCols;
+            for (; x < w && x < colLimit; x += xStep, ++colIdx) {
+                if (colIdx % 5 == 0) {
+                    majorCols.addLine(Point(x, 0), Point(x, h));
+                } else {
+                    minorCols.addLine(Point(x, 0), Point(x, h));
+                }
+            }
+            if (!minorCols.empty()) {
+                auto* minorNode = new SvgPath(minorCols);
+                setSvgStrokeColor(minorNode, minorColor);
+                minorNode->setAttr<float>("stroke-width", 0.8f);
+                newRuleNode->addChild(minorNode);
+            }
+            if (!majorCols.empty()) {
+                auto* majorNode = new SvgPath(majorCols);
+                setSvgStrokeColor(majorNode, majorColor);
+                majorNode->setAttr<float>("stroke-width", 1.6f);
+                newRuleNode->addChild(majorNode);
+            }
+        }
     } else if (m_rulingStyle == RULING_ISOMETRIC) {
         // Isometric 30° / 60° triangle grid
         Path2D isoPath;
@@ -266,13 +313,13 @@ void NativeCanvasSession::rebuildProceduralRuleLayer() {
         isoNode->setAttr<float>("stroke-width", 0.9f);
         newRuleNode->addChild(isoNode);
     } else if (m_rulingStyle == RULING_MUSIC_STAFF) {
-        // 5-line Music Staves with left/right bar borders
-        Path2D staffPath;
+        // 5-line Music Staves with left/right bar borders, one SvgPath per staff for fast culling
         const Dim lineGap = std::max<Dim>(10.0f, std::round(yStep * 0.3f));
         const Dim staffBlock = lineGap * 4.0f + std::max<Dim>(42.0f, yStep * 1.2f);
         const Dim leftPad = m_page->props.marginLeft > 0 ? m_page->props.marginLeft : 48.0f;
         const Dim rightPad = std::max<Dim>(leftPad + 100.0f, w - 48.0f);
         for (Dim baseY = 48.0f; baseY + lineGap * 4.0f < h - 24.0f; baseY += staffBlock) {
+            Path2D staffPath;
             for (int l = 0; l < 5; ++l) {
                 Dim ly = baseY + l * lineGap;
                 staffPath.addLine(Point(leftPad, ly), Point(rightPad, ly));
@@ -280,10 +327,10 @@ void NativeCanvasSession::rebuildProceduralRuleLayer() {
             // Left and right staff barlines
             staffPath.addLine(Point(leftPad, baseY), Point(leftPad, baseY + lineGap * 4.0f));
             staffPath.addLine(Point(rightPad, baseY), Point(rightPad, baseY + lineGap * 4.0f));
+            auto* staffNode = new SvgPath(staffPath);
+            staffNode->setAttr<float>("stroke-width", 1.2f);
+            newRuleNode->addChild(staffNode);
         }
-        auto* staffNode = new SvgPath(staffPath);
-        staffNode->setAttr<float>("stroke-width", 1.2f);
-        newRuleNode->addChild(staffNode);
     } else if (m_rulingStyle == RULING_CORNELL_SUMMARY) {
         // Cornell Note-Taking Template: Header bar, Left cue column, Ruled notes area, Bottom summary box
         const Dim headerY = std::max<Dim>(yStep * 2.0f, 72.0f);
@@ -320,6 +367,7 @@ void NativeCanvasSession::rebuildProceduralRuleLayer() {
 }
 
 bool NativeCanvasSession::loadSvgzBytes(const uint8_t* bytes, size_t length) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!bytes || length == 0) return false;
     auto stream = std::make_unique<MemStream>(
         reinterpret_cast<const char*>(bytes),
@@ -351,6 +399,7 @@ bool NativeCanvasSession::loadSvgzBytes(const uint8_t* bytes, size_t length) {
 }
 
 std::vector<uint8_t> NativeCanvasSession::exportSvgzBytes() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_doc) return {};
     if (m_page && m_page->contentNode) {
         m_page->contentNode->setAttr("rulingstyle", rulingStyleToName(m_rulingStyle));
@@ -368,16 +417,87 @@ std::vector<uint8_t> NativeCanvasSession::exportSvgzBytes() {
 }
 
 bool NativeCanvasSession::renderToPixels(uint8_t* dstPixels, int bmpWidth, int bmpHeight) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!dstPixels || bmpWidth <= 0 || bmpHeight <= 0 || !m_page) return false;
     if (!m_swPainter) {
-        m_swPainter = std::make_unique<Painter>(Painter::PAINT_SW | Painter::NO_TEXT);
+        m_swPainter = std::make_unique<Painter>(
+            Painter::PAINT_SW | Painter::NO_TEXT | Painter::ALIGN_SCISSOR
+        );
     }
+    const float scaleX = static_cast<float>(bmpWidth) / static_cast<float>(std::max(1, m_width));
+    const float scaleY = static_cast<float>(bmpHeight) / static_cast<float>(std::max(1, m_height));
     Image targetImg = Image::fromPixelsNoCopy(bmpWidth, bmpHeight, dstPixels);
     targetImg.fill(m_page->color().color);
     m_swPainter->setTarget(&targetImg);
     m_swPainter->beginFrame(1.0f);
-    Rect fullRect = Rect::wh(bmpWidth, bmpHeight);
+    if (std::abs(scaleX - 1.0f) > 1e-4f || std::abs(scaleY - 1.0f) > 1e-4f) {
+        m_swPainter->transform(Transform2D(scaleX, 0.0f, 0.0f, scaleY, 0.0f, 0.0f));
+    }
+    Rect fullRect = Rect::wh(static_cast<Dim>(m_width), static_cast<Dim>(m_height));
     m_page->draw(m_swPainter.get(), fullRect, /*rulelines=*/true);
+    m_swPainter->endFrame();
+    m_swPainter->setTarget(nullptr);
+    targetImg.data = nullptr;
+    return true;
+}
+
+bool NativeCanvasSession::renderDirtyRectToPixels(
+    uint8_t* dstPixels,
+    int bmpWidth,
+    int bmpHeight,
+    float left,
+    float top,
+    float right,
+    float bottom
+) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!dstPixels || bmpWidth <= 0 || bmpHeight <= 0 || !m_page) return false;
+    if (left >= right || top >= bottom) return false;
+
+    const float scaleX = static_cast<float>(bmpWidth) / static_cast<float>(std::max(1, m_width));
+    const float scaleY = static_cast<float>(bmpHeight) / static_cast<float>(std::max(1, m_height));
+
+    const int pad = 4;
+    const int x0 = std::max(0, static_cast<int>(std::floor(left * scaleX)) - pad);
+    const int y0 = std::max(0, static_cast<int>(std::floor(top * scaleY)) - pad);
+    const int x1 = std::min(bmpWidth, static_cast<int>(std::ceil(right * scaleX)) + pad);
+    const int y1 = std::min(bmpHeight, static_cast<int>(std::ceil(bottom * scaleY)) + pad);
+    const int dirtyW = x1 - x0;
+    const int dirtyH = y1 - y0;
+    if (dirtyW <= 0 || dirtyH <= 0) return false;
+
+    // If the dirty area covers most of the bitmap, fall back to a full-frame render
+    if (static_cast<int64_t>(dirtyW) * dirtyH > (static_cast<int64_t>(bmpWidth) * bmpHeight * 3) / 4) {
+        return renderToPixels(dstPixels, bmpWidth, bmpHeight);
+    }
+
+    if (!m_swPainter) {
+        m_swPainter = std::make_unique<Painter>(
+            Painter::PAINT_SW | Painter::NO_TEXT | Painter::ALIGN_SCISSOR
+        );
+    }
+
+    // Clear only the dirty sub-rectangle rows in the target RGBA buffer
+    const uint32_t bgPixel = m_page->color().color;
+    uint32_t* pixelRows = reinterpret_cast<uint32_t*>(dstPixels);
+    for (int y = y0; y < y1; ++y) {
+        std::fill_n(pixelRows + static_cast<size_t>(y) * bmpWidth + x0, dirtyW, bgPixel);
+    }
+
+    Image targetImg = Image::fromPixelsNoCopy(bmpWidth, bmpHeight, dstPixels);
+    m_swPainter->setTarget(&targetImg);
+    m_swPainter->beginFrame(1.0f);
+    if (std::abs(scaleX - 1.0f) > 1e-4f || std::abs(scaleY - 1.0f) > 1e-4f) {
+        m_swPainter->transform(Transform2D(scaleX, 0.0f, 0.0f, scaleY, 0.0f, 0.0f));
+    }
+    Rect clipRect = Rect::ltrb(
+        static_cast<Dim>(x0) / scaleX,
+        static_cast<Dim>(y0) / scaleY,
+        static_cast<Dim>(x1) / scaleX,
+        static_cast<Dim>(y1) / scaleY
+    );
+    m_swPainter->setClipRect(clipRect);
+    m_page->draw(m_swPainter.get(), clipRect, /*rulelines=*/true);
     m_swPainter->endFrame();
     m_swPainter->setTarget(nullptr);
     targetImg.data = nullptr;
@@ -393,6 +513,7 @@ void NativeCanvasSession::setPen(
     bool lineDrawing,
     float chiselAngle
 ) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     m_penColor = Color::fromArgb(static_cast<uint32_t>(colorArgb)).color;
     m_penWidth = strokeWidth;
     m_pressureSensitive = pressureSensitive;
@@ -413,6 +534,7 @@ void NativeCanvasSession::snapPointIfEnabled(float* inoutX, float* inoutY) const
 void NativeCanvasSession::beginStroke(
     float x, float y, float pressure, float tiltX, float tiltY, double timestampMs
 ) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     snapPointIfEnabled(&x, &y);
     unsigned int penFlags = 0u;
     if (m_penTipType == 2) {
@@ -457,6 +579,7 @@ void NativeCanvasSession::beginStroke(
 void NativeCanvasSession::moveStroke(
     float x, float y, float pressure, float tiltX, float tiltY, double timestampMs
 ) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_activeStroke) return;
     snapPointIfEnabled(&x, &y);
     if (m_lineDrawing) {
@@ -467,6 +590,30 @@ void NativeCanvasSession::moveStroke(
         m_activeStroke->addInputPoint(StrokePoint(x, y, 0.5f, 0, 0, static_cast<Timestamp>(timestampMs)));
     } else {
         m_activeStroke->addInputPoint(StrokePoint(x, y, pressure, tiltX, tiltY, static_cast<Timestamp>(timestampMs)));
+    }
+}
+
+void NativeCanvasSession::moveStrokeBatch(const float* pointsData6, int pointCount) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_activeStroke || !pointsData6 || pointCount <= 0) return;
+    for (int i = 0; i < pointCount; ++i) {
+        const float* pt = pointsData6 + (i * 6);
+        float x = pt[0];
+        float y = pt[1];
+        float pressure = pt[2];
+        float tiltX = pt[3];
+        float tiltY = pt[4];
+        double ts = static_cast<double>(pt[5]);
+        snapPointIfEnabled(&x, &y);
+        if (m_lineDrawing) {
+            m_activeStroke->removePoints(1);
+            if (m_activeStroke->getPath()->empty()) {
+                m_activeStroke->addInputPoint(StrokePoint(x, y, 0.5f, 0, 0, static_cast<Timestamp>(ts)));
+            }
+            m_activeStroke->addInputPoint(StrokePoint(x, y, 0.5f, 0, 0, static_cast<Timestamp>(ts)));
+        } else {
+            m_activeStroke->addInputPoint(StrokePoint(x, y, pressure, tiltX, tiltY, static_cast<Timestamp>(ts)));
+        }
     }
 }
 
@@ -499,15 +646,25 @@ void NativeCanvasSession::autoExpandForBounds(float maxRight, float maxBottom, i
         }
         m_width = targetW;
         m_height = targetH;
-        rebuildProceduralRuleLayer();
+        if (m_rulingStyle != RULING_STANDARD) {
+            rebuildProceduralRuleLayer();
+        }
     }
     if (outNewWidth) *outNewWidth = m_width;
     if (outNewHeight) *outNewHeight = m_height;
 }
 
-std::string NativeCanvasSession::endStroke(bool* outHeightExpanded, int* outNewHeight) {
+std::string NativeCanvasSession::endStroke(
+    bool* outHeightExpanded,
+    int* outNewHeight,
+    float* outDirtyBounds4
+) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (outHeightExpanded) *outHeightExpanded = false;
     if (outNewHeight) *outNewHeight = m_height;
+    if (outDirtyBounds4) {
+        outDirtyBounds4[0] = outDirtyBounds4[1] = outDirtyBounds4[2] = outDirtyBounds4[3] = 0.0f;
+    }
     if (!m_activeStroke || !m_page) return "";
 
     Element* elem = m_activeStroke->finish();
@@ -529,7 +686,7 @@ std::string NativeCanvasSession::endStroke(bool* outHeightExpanded, int* outNewH
     }
     m_page->addStroke(elem, beforeElem);
 
-    Rect bbox = elem->bbox();
+    Rect bbox = elem->bbox().pad(m_penWidth + 4.0f);
     int newW = m_width, newH = m_height;
     autoExpandForBounds(bbox.right, bbox.bottom, &newW, &newH);
     if (newH != prevHeight) {
@@ -538,18 +695,51 @@ std::string NativeCanvasSession::endStroke(bool* outHeightExpanded, int* outNewH
     }
     m_doc->history->endAction();
 
+    if (outDirtyBounds4) {
+        if (!bbox.isValid()) {
+            outDirtyBounds4[0] = 0.0f;
+            outDirtyBounds4[1] = 0.0f;
+            outDirtyBounds4[2] = static_cast<float>(m_width);
+            outDirtyBounds4[3] = static_cast<float>(m_height);
+        } else {
+            outDirtyBounds4[0] = static_cast<float>(bbox.left);
+            outDirtyBounds4[1] = static_cast<float>(bbox.top);
+            outDirtyBounds4[2] = static_cast<float>(bbox.right);
+            outDirtyBounds4[3] = static_cast<float>(bbox.bottom);
+        }
+    }
+
     MemStream xmlBuf;
     SvgWriter::save(elem->node, xmlBuf, "");
     return std::string(xmlBuf.data(), xmlBuf.size());
 }
 
-bool NativeCanvasSession::eraseAt(float x, float y, float radius) {
+bool NativeCanvasSession::eraseAt(float x, float y, float radius, float* outDirtyBounds4) {
+    return eraseSegment(x, y, x, y, radius, outDirtyBounds4);
+}
+
+bool NativeCanvasSession::eraseSegment(
+    float prevX,
+    float prevY,
+    float x,
+    float y,
+    float radius,
+    float* outDirtyBounds4
+) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (outDirtyBounds4) {
+        outDirtyBounds4[0] = outDirtyBounds4[1] = outDirtyBounds4[2] = outDirtyBounds4[3] = 0.0f;
+    }
     if (!m_page) return false;
-    Rect hitBox = Rect::ltwh(x - radius, y - radius, radius * 2.0f, radius * 2.0f);
+    Point p0(prevX, prevY);
+    Point p1(x, y);
+    Rect hitBox = Rect::corners(p0, p1).pad(radius);
     std::vector<Element*> toRemove;
+    Rect dirty;
     for (Element* el : m_page->children()) {
         if (el && el->bbox().intersects(hitBox)) {
             toRemove.push_back(el);
+            dirty.rectUnion(el->bbox());
         }
     }
     if (toRemove.empty()) return false;
@@ -560,16 +750,29 @@ bool NativeCanvasSession::eraseAt(float x, float y, float radius) {
     }
     m_doc->history->endAction();
     sanitizeSelection();
+    if (outDirtyBounds4 && dirty.isValid()) {
+        Rect padded = dirty.pad(6.0f);
+        outDirtyBounds4[0] = static_cast<float>(padded.left);
+        outDirtyBounds4[1] = static_cast<float>(padded.top);
+        outDirtyBounds4[2] = static_cast<float>(padded.right);
+        outDirtyBounds4[3] = static_cast<float>(padded.bottom);
+    }
     return true;
 }
 
-bool NativeCanvasSession::eraseRuledLineAt(float y) {
+bool NativeCanvasSession::eraseRuledLineAt(float y, float* outDirtyBounds4) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (outDirtyBounds4) {
+        outDirtyBounds4[0] = outDirtyBounds4[1] = outDirtyBounds4[2] = outDirtyBounds4[3] = 0.0f;
+    }
     if (!m_page) return false;
     int targetLine = m_page->getLine(static_cast<Dim>(y));
     std::vector<Element*> toRemove;
+    Rect dirty;
     for (Element* el : m_page->children()) {
         if (el && m_page->getLine(el) == targetLine) {
             toRemove.push_back(el);
+            dirty.rectUnion(el->bbox());
         }
     }
     if (toRemove.empty()) return false;
@@ -580,10 +783,28 @@ bool NativeCanvasSession::eraseRuledLineAt(float y) {
     }
     m_doc->history->endAction();
     sanitizeSelection();
+    if (outDirtyBounds4 && dirty.isValid()) {
+        Rect padded = dirty.pad(6.0f);
+        outDirtyBounds4[0] = static_cast<float>(padded.left);
+        outDirtyBounds4[1] = static_cast<float>(padded.top);
+        outDirtyBounds4[2] = static_cast<float>(padded.right);
+        outDirtyBounds4[3] = static_cast<float>(padded.bottom);
+    }
     return true;
 }
 
-bool NativeCanvasSession::eraseFreeSegment(float prevX, float prevY, float x, float y, float radius) {
+bool NativeCanvasSession::eraseFreeSegment(
+    float prevX,
+    float prevY,
+    float x,
+    float y,
+    float radius,
+    float* outDirtyBounds4
+) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (outDirtyBounds4) {
+        outDirtyBounds4[0] = outDirtyBounds4[1] = outDirtyBounds4[2] = outDirtyBounds4[3] = 0.0f;
+    }
     if (!m_page) return false;
     Point p0(prevX, prevY);
     Point p1(x, y);
@@ -594,14 +815,17 @@ bool NativeCanvasSession::eraseFreeSegment(float prevX, float prevY, float x, fl
         Element* next;
     };
     std::vector<TouchedStroke> touchedList;
+    Rect dirty;
 
     auto strokes = m_page->children();
     for (auto it = strokes.begin(); it != strokes.end();) {
         Element* el = *it++;
         Element* nextEl = (it != strokes.end()) ? *it : nullptr;
         if (!el || !el->bbox().intersects(hitBox)) continue;
+        Rect origBBox = el->bbox();
         if (el->freeErase(p0, p1, static_cast<Dim>(radius))) {
             touchedList.push_back({el, nextEl});
+            dirty.rectUnion(origBBox);
         }
     }
     if (touchedList.empty()) return false;
@@ -618,15 +842,24 @@ bool NativeCanvasSession::eraseFreeSegment(float prevX, float prevY, float x, fl
                 std::string strokeId = "s_" + std::to_string(m_strokeSeq);
                 sub->node->setXmlId(strokeId.c_str());
                 m_page->addStroke(sub, nexts);
+                dirty.rectUnion(sub->bbox());
             }
         }
     }
     m_doc->history->endAction();
     sanitizeSelection();
+    if (outDirtyBounds4 && dirty.isValid()) {
+        Rect padded = dirty.pad(6.0f);
+        outDirtyBounds4[0] = static_cast<float>(padded.left);
+        outDirtyBounds4[1] = static_cast<float>(padded.top);
+        outDirtyBounds4[2] = static_cast<float>(padded.right);
+        outDirtyBounds4[3] = static_cast<float>(padded.bottom);
+    }
     return true;
 }
 
 bool NativeCanvasSession::resizeCanvas(int newWidth, int newHeight) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_page) return false;
     m_doc->history->startAction(0);
     PageProperties props = m_page->getProperties();
@@ -636,7 +869,9 @@ bool NativeCanvasSession::resizeCanvas(int newWidth, int newHeight) {
     if (m_page->svgDoc) {
         m_page->svgDoc->setViewBox(Rect());
     }
-    rebuildProceduralRuleLayer();
+    if (m_rulingStyle != RULING_STANDARD) {
+        rebuildProceduralRuleLayer();
+    }
     m_doc->history->endAction();
     m_width = newWidth;
     m_height = newHeight;
@@ -1085,7 +1320,9 @@ bool NativeCanvasSession::insertVerticalSpace(float yThreshold, float deltaY, bo
             m_page->svgDoc->setViewBox(Rect());
         }
         m_height = targetHeight;
-        rebuildProceduralRuleLayer();
+        if (m_rulingStyle != RULING_STANDARD) {
+            rebuildProceduralRuleLayer();
+        }
     }
     m_doc->history->endAction();
     if (outNewHeight) *outNewHeight = m_height;
@@ -1140,7 +1377,9 @@ bool NativeCanvasSession::insertHorizontalSpace(float xThreshold, float deltaX, 
             m_page->svgDoc->setViewBox(Rect());
         }
         m_width = targetWidth;
-        rebuildProceduralRuleLayer();
+        if (m_rulingStyle != RULING_STANDARD) {
+            rebuildProceduralRuleLayer();
+        }
     }
     m_doc->history->endAction();
     if (outNewWidth) *outNewWidth = m_width;
@@ -1264,7 +1503,9 @@ bool NativeCanvasSession::insertRuledSpace(
             m_page->svgDoc->setViewBox(Rect());
         }
         m_height = targetHeight;
-        rebuildProceduralRuleLayer();
+        if (m_rulingStyle != RULING_STANDARD) {
+            rebuildProceduralRuleLayer();
+        }
     }
 
     m_doc->history->endAction();
@@ -1297,11 +1538,19 @@ bool NativeCanvasSession::setPageSetup(
     if (rulingStyle >= 0) {
         m_rulingStyle = rulingStyle;
     }
+    if (m_rulingStyle == RULING_STANDARD) {
+        m_page->isCustomRuling = false;
+        if (m_page->contentNode) {
+            m_page->contentNode->setAttr("rulingstyle", rulingStyleToName(m_rulingStyle));
+        }
+    }
     m_page->setProperties(&props);
     if (m_page->svgDoc) {
         m_page->svgDoc->setViewBox(Rect());
     }
-    rebuildProceduralRuleLayer();
+    if (m_rulingStyle != RULING_STANDARD) {
+        rebuildProceduralRuleLayer();
+    }
     m_doc->history->endAction();
 
     m_width = static_cast<int>(m_page->width());
@@ -1479,6 +1728,7 @@ int NativeCanvasSession::strokeCount() const {
 }
 
 bool NativeCanvasSession::undo() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_doc || !m_doc->history || !m_doc->history->canUndo()) return false;
     m_doc->history->undo();
     if (m_page) {
@@ -1493,6 +1743,7 @@ bool NativeCanvasSession::undo() {
 }
 
 bool NativeCanvasSession::redo() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_doc || !m_doc->history || !m_doc->history->canRedo()) return false;
     m_doc->history->redo();
     if (m_page) {
@@ -1507,10 +1758,12 @@ bool NativeCanvasSession::redo() {
 }
 
 bool NativeCanvasSession::canUndo() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     return m_doc && m_doc->history && m_doc->history->canUndo();
 }
 
 bool NativeCanvasSession::canRedo() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     return m_doc && m_doc->history && m_doc->history->canRedo();
 }
 
@@ -1531,10 +1784,19 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeCreateSession(
 }
 
 JNIEXPORT void JNICALL
+Java_com_orgwritenotes_ink_WriteNativeBridge_nativeRetainSession(
+    JNIEnv*, jobject, jlong handle
+) {
+    auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (session) session->retain();
+}
+
+JNIEXPORT void JNICALL
 Java_com_orgwritenotes_ink_WriteNativeBridge_nativeDestroySession(
     JNIEnv*, jobject, jlong handle
 ) {
-    delete reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (session) session->release();
 }
 
 JNIEXPORT jboolean JNICALL
@@ -1590,6 +1852,43 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeRenderToBitmap(
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT jboolean JNICALL
+Java_com_orgwritenotes_ink_WriteNativeBridge_nativeRenderDirtyRectToBitmap(
+    JNIEnv* env,
+    jobject,
+    jlong handle,
+    jobject bitmap,
+    jfloat left,
+    jfloat top,
+    jfloat right,
+    jfloat bottom
+) {
+    auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!session || !bitmap) return JNI_FALSE;
+    AndroidBitmapInfo info{};
+    if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) {
+        return JNI_FALSE;
+    }
+    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
+        return JNI_FALSE;
+    }
+    void* pixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS || !pixels) {
+        return JNI_FALSE;
+    }
+    bool ok = session->renderDirtyRectToPixels(
+        reinterpret_cast<uint8_t*>(pixels),
+        static_cast<int>(info.width),
+        static_cast<int>(info.height),
+        left,
+        top,
+        right,
+        bottom
+    );
+    AndroidBitmap_unlockPixels(env, bitmap);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT void JNICALL
 Java_com_orgwritenotes_ink_WriteNativeBridge_nativeSetPen(
     JNIEnv*,
@@ -1633,6 +1932,27 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeMoveStroke(
     if (session) session->moveStroke(x, y, pressure, tiltX, tiltY, timestampMs);
 }
 
+JNIEXPORT void JNICALL
+Java_com_orgwritenotes_ink_WriteNativeBridge_nativeMoveStrokeBatch(
+    JNIEnv* env, jobject, jlong handle, jfloatArray pointsData6, jint pointCount
+) {
+    auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!session || !pointsData6 || pointCount <= 0) return;
+    const jsize totalFloats = pointCount * 6;
+    if (env->GetArrayLength(pointsData6) < totalFloats) return;
+
+    constexpr int STACK_MAX_POINTS = 64;
+    if (pointCount <= STACK_MAX_POINTS) {
+        jfloat stackBuf[STACK_MAX_POINTS * 6];
+        env->GetFloatArrayRegion(pointsData6, 0, totalFloats, stackBuf);
+        session->moveStrokeBatch(stackBuf, pointCount);
+    } else {
+        std::vector<jfloat> heapBuf(static_cast<size_t>(totalFloats));
+        env->GetFloatArrayRegion(pointsData6, 0, totalFloats, heapBuf.data());
+        session->moveStrokeBatch(heapBuf.data(), pointCount);
+    }
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_orgwritenotes_ink_WriteNativeBridge_nativeEndStroke(
     JNIEnv* env, jobject, jlong handle, jintArray outNewDimensions
@@ -1641,10 +1961,24 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeEndStroke(
     if (!session) return env->NewStringUTF("");
     bool expanded = false;
     int newHeight = session->height();
-    std::string pathXml = session->endStroke(&expanded, &newHeight);
-    if (outNewDimensions && env->GetArrayLength(outNewDimensions) >= 2) {
-        jint dims[2] = { session->width(), newHeight };
-        env->SetIntArrayRegion(outNewDimensions, 0, 2, dims);
+    float dirtyBounds[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    std::string pathXml = session->endStroke(&expanded, &newHeight, dirtyBounds);
+    if (outNewDimensions) {
+        const jsize len = env->GetArrayLength(outNewDimensions);
+        if (len >= 6) {
+            jint dimsAndDirty[6] = {
+                session->width(),
+                newHeight,
+                static_cast<jint>(std::floor(dirtyBounds[0])),
+                static_cast<jint>(std::floor(dirtyBounds[1])),
+                static_cast<jint>(std::ceil(dirtyBounds[2])),
+                static_cast<jint>(std::ceil(dirtyBounds[3]))
+            };
+            env->SetIntArrayRegion(outNewDimensions, 0, 6, dimsAndDirty);
+        } else if (len >= 2) {
+            jint dims[2] = { session->width(), newHeight };
+            env->SetIntArrayRegion(outNewDimensions, 0, 2, dims);
+        }
     }
     return env->NewStringUTF(pathXml.c_str());
 }
@@ -1671,6 +2005,36 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeEraseFreeSegment(
 ) {
     auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
     return (session && session->eraseFreeSegment(prevX, prevY, x, y, radius)) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_orgwritenotes_ink_WriteNativeBridge_nativeEraseSegmentDirty(
+    JNIEnv* env,
+    jobject,
+    jlong handle,
+    jfloat prevX,
+    jfloat prevY,
+    jfloat x,
+    jfloat y,
+    jfloat radius,
+    jint eraseMode,
+    jfloatArray outDirty4
+) {
+    auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!session) return JNI_FALSE;
+    float dirty[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    bool erased = false;
+    if (eraseMode == 1) {
+        erased = session->eraseRuledLineAt(y, dirty);
+    } else if (eraseMode == 2) {
+        erased = session->eraseFreeSegment(prevX, prevY, x, y, radius, dirty);
+    } else {
+        erased = session->eraseSegment(prevX, prevY, x, y, radius, dirty);
+    }
+    if (erased && outDirty4 && env->GetArrayLength(outDirty4) >= 4) {
+        env->SetFloatArrayRegion(outDirty4, 0, 4, dirty);
+    }
+    return erased ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jint JNICALL
