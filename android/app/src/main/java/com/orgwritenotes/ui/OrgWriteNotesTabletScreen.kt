@@ -941,6 +941,55 @@ private fun SidebarNodeRow(
     }
 }
 
+/**
+ * Owns the live org-clock tick so only this chip recomposes each tick, not the whole editor pane
+ * (and its ink canvases). E-Ink panels tick once a minute to avoid a screen refresh every second.
+ */
+@Composable
+private fun ClockChip(
+    nodeId: String,
+    clockedIn: Boolean,
+    clockedMinutes: Int,
+    isEInk: Boolean,
+    onToggle: () -> Unit
+) {
+    var extraSeconds by remember(nodeId, clockedIn, clockedMinutes) { mutableStateOf(0) }
+    val tickSeconds = if (isEInk) 60 else 1
+    LaunchedEffect(nodeId, clockedIn, tickSeconds) {
+        if (clockedIn) {
+            while (true) {
+                delay(tickSeconds * 1000L)
+                extraSeconds += tickSeconds
+            }
+        }
+    }
+
+    val totalMinutes = clockedMinutes + (extraSeconds / 60)
+    val clockLabel = if (clockedIn) {
+        if (isEInk) "⏱ Clocked In (${totalMinutes}m) • Stop" else "⏱ Clocked In (${totalMinutes}m ${extraSeconds % 60}s) • Stop"
+    } else if (clockedMinutes > 0) {
+        "⏱ Clock In (${clockedMinutes}m)"
+    } else {
+        "⏱ Clock In"
+    }
+    Text(
+        text = clockLabel,
+        color = if (isEInk) Color.Black else (if (clockedIn) Color(0xFF22C55E) else Color(0xFF94A3B8)),
+        fontSize = 11.sp,
+        fontFamily = FontFamily.Monospace,
+        fontWeight = if (clockedIn) FontWeight.Bold else FontWeight.Normal,
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(
+                if (isEInk) (if (clockedIn) Color(0xFFE2E8F0) else Color(0xFFF1F5F9))
+                else (if (clockedIn) Color(0xFF064E3B) else Color(0xFF0F172A))
+            )
+            .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(6.dp)) else Modifier)
+            .clickable(onClick = onToggle)
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    )
+}
+
 @Composable
 private fun HybridNodeEditorPane(
     snapshot: OrgNodeSnapshot,
@@ -1006,19 +1055,6 @@ private fun HybridNodeEditorPane(
     var showPageSetupDialog by remember { mutableStateOf(false) }
     var showOcrDialog by remember { mutableStateOf(false) }
     var ocrDraftText by remember { mutableStateOf("") }
-
-    // Live org-clock ticker when clockedIn is active
-    var extraClockSeconds by remember(snapshot.nodeId, snapshot.header.clockedIn, snapshot.header.clockedMinutes) {
-        mutableStateOf(0)
-    }
-    LaunchedEffect(snapshot.nodeId, snapshot.header.clockedIn) {
-        if (snapshot.header.clockedIn) {
-            while (true) {
-                delay(1000L)
-                extraClockSeconds += 1
-            }
-        }
-    }
 
     // Auto-Hide Stylus Labs Write Toolbar state
     var isToolbarVisible by remember(snapshot.nodeId) { mutableStateOf(inkBlocks.isNotEmpty()) }
@@ -1314,36 +1350,18 @@ private fun HybridNodeEditorPane(
                         .padding(horizontal = 8.dp, vertical = 4.dp)
                 )
 
-                val totalMinutes = snapshot.header.clockedMinutes + (extraClockSeconds / 60)
-                val remSec = extraClockSeconds % 60
-                val clockLabel = if (snapshot.header.clockedIn) {
-                    "⏱ Clocked In (${totalMinutes}m ${remSec}s) • Stop"
-                } else if (snapshot.header.clockedMinutes > 0) {
-                    "⏱ Clock In (${snapshot.header.clockedMinutes}m)"
-                } else {
-                    "⏱ Clock In"
-                }
-                Text(
-                    text = clockLabel,
-                    color = if (isEInk) Color.Black else (if (snapshot.header.clockedIn) Color(0xFF22C55E) else Color(0xFF94A3B8)),
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = if (snapshot.header.clockedIn) FontWeight.Bold else FontWeight.Normal,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(
-                            if (isEInk) (if (snapshot.header.clockedIn) Color(0xFFE2E8F0) else Color(0xFFF1F5F9))
-                            else (if (snapshot.header.clockedIn) Color(0xFF064E3B) else Color(0xFF0F172A))
-                        )
-                        .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(6.dp)) else Modifier)
-                        .clickable {
-                            if (snapshot.header.clockedIn) {
-                                syncClient.clockOut(snapshot.nodeId)
-                            } else {
-                                syncClient.clockIn(snapshot.nodeId)
-                            }
+                ClockChip(
+                    nodeId = snapshot.nodeId,
+                    clockedIn = snapshot.header.clockedIn,
+                    clockedMinutes = snapshot.header.clockedMinutes,
+                    isEInk = isEInk,
+                    onToggle = {
+                        if (snapshot.header.clockedIn) {
+                            syncClient.clockOut(snapshot.nodeId)
+                        } else {
+                            syncClient.clockIn(snapshot.nodeId)
                         }
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                    }
                 )
             }
 
