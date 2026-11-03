@@ -9,11 +9,14 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
-import androidx.compose.material3.darkColorScheme
 import androidx.lifecycle.lifecycleScope
+import com.orgwritenotes.ink.OnyxEInkBridge
 import com.orgwritenotes.sync.EmacsSyncClient
 import com.orgwritenotes.ui.OrgWriteNotesTabletScreen
 
@@ -36,8 +39,25 @@ class MainActivity : ComponentActivity() {
             // B8: user text-size multiplier on top of the system font scale.
             val base = LocalDensity.current
             val density = Density(base.density, base.fontScale * com.orgwritenotes.ui.UiPrefs.fontMultiplier)
+            val colorScheme = if (OnyxEInkBridge.isEInkDevice) {
+                lightColorScheme(
+                    primary = Color.Black,
+                    onPrimary = Color.White,
+                    secondary = Color(0xFF1E293B),
+                    onSecondary = Color.White,
+                    background = Color.White,
+                    onBackground = Color.Black,
+                    surface = Color(0xFFF8FAFC),
+                    onSurface = Color.Black,
+                    surfaceVariant = Color(0xFFF1F5F9),
+                    onSurfaceVariant = Color(0xFF1E293B),
+                    outline = Color.Black
+                )
+            } else {
+                darkColorScheme()
+            }
             CompositionLocalProvider(LocalDensity provides density) {
-                MaterialTheme(colorScheme = darkColorScheme()) {
+                MaterialTheme(colorScheme = colorScheme) {
                     OrgWriteNotesTabletScreen(syncClient = syncClient)
                 }
             }

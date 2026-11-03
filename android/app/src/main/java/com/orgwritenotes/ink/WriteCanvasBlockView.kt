@@ -75,8 +75,8 @@ data class WritePageSetupState(
     val xRuling: Int = 40,
     val yRuling: Int = 40,
     val marginLeft: Int = 0,
-    val paperColorArgb: Int = 0xFFFFFDF8.toInt(),
-    val ruleColorArgb: Int = 0xFF4A90E2.toInt(),
+    val paperColorArgb: Int = if (OnyxEInkBridge.isEInkDevice) 0xFFFFFFFF.toInt() else 0xFFFFFDF8.toInt(),
+    val ruleColorArgb: Int = if (OnyxEInkBridge.isEInkDevice) 0xFF64748B.toInt() else 0xFF4A90E2.toInt(),
     val strokeCount: Int = 0,
     val rulingStyle: Int = WriteTemplateStyle.STANDARD.nativeCode,
     val hasCustomTemplateNodes: Boolean = false
@@ -368,7 +368,7 @@ class WriteCanvasBlockView(
     var stylusOnlyMode: Boolean = false
     private var lastStylusActivityMs: Long = 0L
     var enableRuledReflow: Boolean = true
-    private var penColorArgb: Int = 0xFF1E293B.toInt()
+    private var penColorArgb: Int = if (OnyxEInkBridge.isEInkDevice) 0xFF000000.toInt() else 0xFF1E293B.toInt()
     private var penWidthPx: Float = 2.8f
     private var penTip: WritePenTip = WritePenTip.ROUND
     private var pressureSensitive: Boolean = true
@@ -378,6 +378,150 @@ class WriteCanvasBlockView(
         private set
     var penChiselAngle: Float = 45.0f
         private set
+
+    // Tier 3: Optional Onyx Boox direct-to-EPD TouchHelper session (null on non-Onyx or when unsupported)
+    private var onyxRawSession: OnyxEInkBridge.OnyxRawTouchSession? = null
+    private var isOnyxRawStrokeInProgress: Boolean = false
+
+    private val onyxRawStrokeListener = object : OnyxEInkBridge.RawStrokeListener {
+        override fun onRawStrokeBegin(
+            screenX: Float,
+            screenY: Float,
+            pressure: Float,
+            tiltX: Float,
+            tiltY: Float,
+            timestampMs: Long
+        ) {
+            isOnyxRawStrokeInProgress = true
+            onCanvasActivated?.invoke()
+            val snappedX = snapX(screenToCanvasX(screenX))
+            val snappedY = snapY(screenToCanvasY(screenY))
+            strokeSmoother.reset(snappedX, snappedY)
+            if (nativeHandle != 0L) {
+                WriteNativeBridge.nativeBeginStroke(
+                    nativeHandle,
+                    snappedX,
+                    snappedY,
+                    StrokeTuning.curve(pressure),
+                    tiltX,
+                    tiltY,
+                    timestampMs.toDouble()
+                )
+            }
+        }
+
+        override fun onRawStrokeMove(
+            screenX: Float,
+            screenY: Float,
+            pressure: Float,
+            tiltX: Float,
+            tiltY: Float,
+            timestampMs: Long
+        ) {
+            if (!isOnyxRawStrokeInProgress) return
+            val snappedX = snapX(screenToCanvasX(screenX))
+            val snappedY = snapY(screenToCanvasY(screenY))
+            val (smoothX, smoothY) = strokeSmoother.apply(snappedX, snappedY)
+            if (nativeHandle != 0L) {
+                WriteNativeBridge.nativeMoveStroke(
+                    nativeHandle,
+                    smoothX,
+                    smoothY,
+                    StrokeTuning.curve(pressure),
+                    tiltX,
+                    tiltY,
+                    timestampMs.toDouble()
+                )
+            }
+        }
+
+        override fun onRawStrokeEnd() {
+            if (!isOnyxRawStrokeInProgress) return
+            isOnyxRawStrokeInProgress = false
+            finalizeActiveNativeStroke()
+            OnyxEInkBridge.requestCleanRefresh(this@WriteCanvasBlockView)
+        }
+
+        override fun onRawEraseBegin(screenX: Float, screenY: Float, timestampMs: Long) {
+            onCanvasActivated?.invoke()
+            val cx = screenToCanvasX(screenX)
+            val cy = screenToCanvasY(screenY)
+            freeEraseLastX = cx
+            freeEraseLastY = cy
+            val eraseRadius = if (toolMode == StylusToolMode.ERASER_FREE) 18f else 22f
+            activeEraserCursor = Triple(cx, cy, eraseRadius)
+            anyErasedInGesture = false
+            if (nativeHandle != 0L) {
+                val eraseModeCode = when (toolMode) {
+                    StylusToolMode.ERASER_RULED -> 1
+                    StylusToolMode.ERASER_FREE -> 2
+                    else -> 0
+                }
+                if (WriteNativeBridge.nativeEraseSegmentDirty(
+                        nativeHandle, cx, cy, cx, cy, eraseRadius, eraseModeCode, tmpDirty4
+                    )
+                ) {
+                    anyErasedInGesture = true
+                    refreshDirtyRect(tmpDirty4[0], tmpDirty4[1], tmpDirty4[2], tmpDirty4[3], notifyState = false)
+                }
+            }
+        }
+
+        override fun onRawEraseMove(screenX: Float, screenY: Float, timestampMs: Long) {
+            val cx = screenToCanvasX(screenX)
+            val cy = screenToCanvasY(screenY)
+            if (freeEraseLastX == 0f && freeEraseLastY == 0f) {
+                freeEraseLastX = cx
+                freeEraseLastY = cy
+            }
+            val eraseRadius = if (toolMode == StylusToolMode.ERASER_FREE) 18f else 22f
+            activeEraserCursor = Triple(cx, cy, eraseRadius)
+            if (nativeHandle != 0L) {
+                val eraseModeCode = when (toolMode) {
+                    StylusToolMode.ERASER_RULED -> 1
+                    StylusToolMode.ERASER_FREE -> 2
+                    else -> 0
+                }
+                if (WriteNativeBridge.nativeEraseSegmentDirty(
+                        nativeHandle, freeEraseLastX, freeEraseLastY, cx, cy, eraseRadius, eraseModeCode, tmpDirty4
+                    )
+                ) {
+                    anyErasedInGesture = true
+                    refreshDirtyRect(tmpDirty4[0], tmpDirty4[1], tmpDirty4[2], tmpDirty4[3], notifyState = false)
+                }
+            }
+            freeEraseLastX = cx
+            freeEraseLastY = cy
+        }
+
+        override fun onRawEraseEnd() {
+            activeEraserCursor = null
+            freeEraseLastX = 0f
+            freeEraseLastY = 0f
+            invalidate()
+            if (anyErasedInGesture) {
+                anyErasedInGesture = false
+                notifyViewportUpdated()
+                OnyxEInkBridge.requestCleanRefresh(this@WriteCanvasBlockView)
+                onStrokeCommitted("<erase/>", canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
+            }
+        }
+    }
+
+    private fun syncOnyxRawDrawingState() {
+        val session = onyxRawSession ?: return
+        val shouldUseRawDrawing = (toolMode == StylusToolMode.PEN || toolMode == StylusToolMode.HIGHLIGHTER) &&
+            !selectionState.hasSelection &&
+            !lineDrawing
+        if (shouldUseRawDrawing) {
+            val effZoom = if (isZoomedMode) zoomScale else 1.0f
+            session.updateLimitRect(this)
+            session.configureStroke(penWidthPx * effZoom, resolveLivePreviewStrokeColor())
+            session.setRawDrawingEnabled(true, renderToEpd = true)
+        } else {
+            session.setRawDrawingEnabled(false)
+        }
+    }
 
     // Viewport Pan & Zoom state (active when isZoomedMode == true)
     var zoomScale: Float = 1.0f
@@ -401,6 +545,9 @@ class WriteCanvasBlockView(
     }
 
     private fun resolveLivePreviewStrokeColor(): Int {
+        if (OnyxEInkBridge.isEInkDevice && toolMode != StylusToolMode.HIGHLIGHTER) {
+            return 0xFF000000.toInt()
+        }
         if (toolMode == StylusToolMode.HIGHLIGHTER) return penColorArgb
         val r = (penColorArgb ushr 16) and 0xFF
         val g = (penColorArgb ushr 8) and 0xFF
@@ -421,23 +568,37 @@ class WriteCanvasBlockView(
     }
 
     fun setAdaptiveTheme(isDark: Boolean, bgArgb: Int = 0xFF181825.toInt(), fgArgb: Int = 0xFFCDD6F4.toInt()) {
+        // On E-Ink devices, dark/light theme switching is disabled: always enforce crisp black ink on light paper.
+        val effectiveDark = if (OnyxEInkBridge.isEInkDevice) false else isDark
         val safeBg = (bgArgb or 0xFF000000.toInt()).let {
             if (isArgbDark(it)) it else 0xFF181825.toInt()
         }
         val safeFg = (fgArgb or 0xFF000000.toInt()).let {
             if (!isArgbDark(it)) it else 0xFFCDD6F4.toInt()
         }
-        val changed = isDarkTheme != isDark || darkBgColorArgb != safeBg || darkFgColorArgb != safeFg
-        isDarkTheme = isDark
+        val changed = isDarkTheme != effectiveDark || darkBgColorArgb != safeBg || darkFgColorArgb != safeFg
+        isDarkTheme = effectiveDark
         darkBgColorArgb = safeBg
         darkFgColorArgb = safeFg
-        workspaceBgPaint.color = if (isDark) 0xFF18181B.toInt() else 0xFFE2E8F0.toInt()
-        paperPaint.color = if (isDark) safeBg else 0xFFFFFDF8.toInt()
-        gridPaint.color = if (isDark) 0x55334155 else 0x264A90E2
+        workspaceBgPaint.color = when {
+            OnyxEInkBridge.isEInkDevice -> 0xFFF1F5F9.toInt()
+            effectiveDark -> 0xFF18181B.toInt()
+            else -> 0xFFE2E8F0.toInt()
+        }
+        paperPaint.color = when {
+            OnyxEInkBridge.isEInkDevice -> 0xFFFFFFFF.toInt()
+            effectiveDark -> safeBg
+            else -> 0xFFFFFDF8.toInt()
+        }
+        gridPaint.color = when {
+            OnyxEInkBridge.isEInkDevice -> 0xFF64748B.toInt()
+            effectiveDark -> 0x55334155
+            else -> 0x264A90E2
+        }
         currentLiveStrokePaint.color = resolveLivePreviewStrokeColor()
         synchronized(nativeLock) {
             if (nativeHandle != 0L) {
-                WriteNativeBridge.nativeSetRenderTheme(nativeHandle, isDark, safeBg, safeFg)
+                WriteNativeBridge.nativeSetRenderTheme(nativeHandle, effectiveDark, safeBg, safeFg)
                 if (changed) {
                     refreshBackingBitmap()
                 }
@@ -555,19 +716,20 @@ class WriteCanvasBlockView(
 
     private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val workspaceBgPaint = Paint().apply {
-        color = 0xFF18181B.toInt()
+        color = if (OnyxEInkBridge.isEInkDevice) 0xFFF1F5F9.toInt() else 0xFF18181B.toInt()
         style = Paint.Style.FILL
     }
     private val pageShadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0x66000000
-        style = Paint.Style.FILL
+        color = if (OnyxEInkBridge.isEInkDevice) 0xFF000000.toInt() else 0x66000000
+        style = if (OnyxEInkBridge.isEInkDevice) Paint.Style.STROKE else Paint.Style.FILL
+        strokeWidth = if (OnyxEInkBridge.isEInkDevice) 2.0f else 0f
     }
     private val paperPaint = Paint().apply {
-        color = 0xFFFFFDF8.toInt()
+        color = if (OnyxEInkBridge.isEInkDevice) 0xFFFFFFFF.toInt() else 0xFFFFFDF8.toInt()
         style = Paint.Style.FILL
     }
     private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0x264A90E2
+        color = if (OnyxEInkBridge.isEInkDevice) 0xFF64748B.toInt() else 0x264A90E2
         strokeWidth = 1.2f
         style = Paint.Style.STROKE
     }
@@ -613,6 +775,7 @@ class WriteCanvasBlockView(
             override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
                 if (!isZoomedMode) return false
                 activeLiveStrokePath = null
+                OnyxEInkBridge.enterFastPanMode(this@WriteCanvasBlockView)
                 return true
             }
 
@@ -638,11 +801,36 @@ class WriteCanvasBlockView(
                 if (!isZoomedMode) return
                 lastReportedZoomPct = (zoomScale * 100f).roundToInt()
                 notifyZoomOnlyUpdated()
+                syncOnyxRawDrawingState()
+                OnyxEInkBridge.exitFastPanModeAndRefresh(this@WriteCanvasBlockView)
             }
         }
     ).apply {
         isQuickScaleEnabled = false
         isStylusScaleEnabled = false
+    }
+
+    private fun applyEInkPaperDefaultsIfNeeded() {
+        if (!OnyxEInkBridge.isEInkDevice || nativeHandle == 0L) return
+        val info = tmpPageInfo10
+        WriteNativeBridge.nativeGetPageInfo(nativeHandle, info)
+        val curPaper = info[5]
+        val curRule = info[6]
+        val needsWhitePaper = isArgbDark(curPaper) || curPaper == 0xFFFFFDF8.toInt()
+        if (needsWhitePaper) {
+            val crispRule = if ((curRule ushr 24) < 0x80) 0xFF64748B.toInt() else curRule
+            WriteNativeBridge.nativeSetPageSetup(
+                nativeHandle,
+                info[0].coerceAtLeast(100),
+                info[1].coerceAtLeast(100),
+                info[2],
+                info[3],
+                info[4],
+                0xFFFFFFFF.toInt(),
+                crispRule,
+                info[8]
+            )
+        }
     }
 
     init {
@@ -653,6 +841,7 @@ class WriteCanvasBlockView(
                 nativeHandle = WriteNativeBridge.nativeCreateSession(
                     initialWidth, initialHeight, xRuling, yRuling
                 )
+                applyEInkPaperDefaultsIfNeeded()
                 WriteNativeBridge.nativeSetPen(
                     nativeHandle,
                     penColorArgb,
@@ -1002,6 +1191,7 @@ class WriteCanvasBlockView(
         } else {
             WriteSelectionState()
         }
+        syncOnyxRawDrawingState()
         onSelectionChanged?.invoke(selectionState)
         invalidate()
     }
@@ -1021,6 +1211,7 @@ class WriteCanvasBlockView(
                     val ok = WriteNativeBridge.nativeLoadSvgz(nativeHandle, Base64.decode(base64, Base64.DEFAULT))
                     if (ok) {
                         lastSyncedSvgzBase64 = base64
+                        applyEInkPaperDefaultsIfNeeded()
                         WriteNativeBridge.nativeSetRenderTheme(nativeHandle, isDarkTheme, darkBgColorArgb, darkFgColorArgb)
                     }
                     ok
@@ -1264,6 +1455,7 @@ class WriteCanvasBlockView(
                 penChiselAngle
             )
         }
+        syncOnyxRawDrawingState()
         invalidate()
     }
 
@@ -1279,7 +1471,8 @@ class WriteCanvasBlockView(
         zoomScale = next
         lastReportedZoomPct = (zoomScale * 100f).roundToInt()
         notifyZoomOnlyUpdated()
-        invalidate()
+        syncOnyxRawDrawingState()
+        OnyxEInkBridge.requestCleanRefresh(this)
     }
 
     fun resetZoom100() {
@@ -1289,7 +1482,8 @@ class WriteCanvasBlockView(
         panOffsetY = 24f
         lastReportedZoomPct = 100
         notifyZoomOnlyUpdated()
-        invalidate()
+        syncOnyxRawDrawingState()
+        OnyxEInkBridge.requestCleanRefresh(this)
     }
 
     fun zoomFitWidth() {
@@ -1300,7 +1494,8 @@ class WriteCanvasBlockView(
         panOffsetY = 24f
         lastReportedZoomPct = (zoomScale * 100f).roundToInt()
         notifyZoomOnlyUpdated()
-        invalidate()
+        syncOnyxRawDrawingState()
+        OnyxEInkBridge.requestCleanRefresh(this)
     }
 
     fun zoomFitPage() {
@@ -1312,7 +1507,17 @@ class WriteCanvasBlockView(
         panOffsetX = (width - canvasWidthPx * zoomScale) / 2f
         panOffsetY = ((height - canvasHeightPx * zoomScale) / 2f).coerceAtLeast(16f)
         notifyViewportUpdated()
-        invalidate()
+        syncOnyxRawDrawingState()
+        OnyxEInkBridge.requestCleanRefresh(this)
+    }
+
+    /** Discrete vertical page scroll for E-Ink reading/writing without drag-pan ghosting. */
+    fun pageScrollVertical(direction: Int) {
+        if (!isZoomedMode || height <= 0) return
+        val step = (height * 0.8f) * direction
+        panOffsetY -= step
+        notifyZoomOnlyUpdated()
+        OnyxEInkBridge.requestCleanRefresh(this)
     }
 
     // Selection Actions (Translate, Scale, Rotate, Copy, Cut, Paste, Duplicate, Restyle, Delete)
@@ -1328,6 +1533,7 @@ class WriteCanvasBlockView(
             WriteNativeBridge.nativeClearSelection(nativeHandle)
         }
         selectionState = WriteSelectionState()
+        syncOnyxRawDrawingState()
         onSelectionChanged?.invoke(selectionState)
         invalidate()
     }
@@ -1608,6 +1814,11 @@ class WriteCanvasBlockView(
         newRulingStyle: Int = -1
     ) {
         if (nativeHandle == 0L) return
+        val effectivePaperColor = if (OnyxEInkBridge.isEInkDevice && isArgbDark(newPaperColorArgb)) {
+            0xFFFFFFFF.toInt()
+        } else {
+            newPaperColorArgb
+        }
         if (WriteNativeBridge.nativeSetPageSetup(
                 nativeHandle,
                 newWidth,
@@ -1615,7 +1826,7 @@ class WriteCanvasBlockView(
                 newXRuling,
                 newYRuling,
                 newMarginLeft,
-                newPaperColorArgb,
+                effectivePaperColor,
                 newRuleColorArgb,
                 newRulingStyle
             )
@@ -1768,6 +1979,8 @@ class WriteCanvasBlockView(
         if (isZoomedMode && oldw == 0 && w > 0) {
             zoomFitWidth()
         }
+        onyxRawSession?.updateLimitRect(this)
+        syncOnyxRawDrawingState()
     }
 
     override fun onHoverEvent(event: MotionEvent): Boolean {
@@ -1882,6 +2095,8 @@ class WriteCanvasBlockView(
                             panOffsetX += (avgX - panLastTouchX)
                             panOffsetY += (avgY - panLastTouchY)
                             invalidate()
+                        } else {
+                            OnyxEInkBridge.enterFastPanMode(this)
                         }
                         isPanningGesture = true
                         panLastTouchX = avgX
@@ -1890,7 +2105,11 @@ class WriteCanvasBlockView(
                         event.actionMasked == MotionEvent.ACTION_POINTER_UP ||
                         event.actionMasked == MotionEvent.ACTION_CANCEL
                     ) {
-                        isPanningGesture = false
+                        if (isPanningGesture) {
+                            isPanningGesture = false
+                            syncOnyxRawDrawingState()
+                            OnyxEInkBridge.exitFastPanModeAndRefresh(this)
+                        }
                     }
                     return true
                 }
@@ -1998,6 +2217,7 @@ class WriteCanvasBlockView(
                     isPanningGesture = true
                     panLastTouchX = touchX
                     panLastTouchY = touchY
+                    OnyxEInkBridge.enterFastPanMode(this)
                     return true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -2011,7 +2231,11 @@ class WriteCanvasBlockView(
                     return true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    isPanningGesture = false
+                    if (isPanningGesture) {
+                        isPanningGesture = false
+                        syncOnyxRawDrawingState()
+                        OnyxEInkBridge.exitFastPanModeAndRefresh(this)
+                    }
                     return true
                 }
             }
@@ -2332,6 +2556,7 @@ class WriteCanvasBlockView(
                     if (anyErasedInGesture) {
                         anyErasedInGesture = false
                         notifyViewportUpdated()
+                        OnyxEInkBridge.requestCleanRefresh(this)
                         onStrokeCommitted("<erase/>", canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
                     }
                     return true
@@ -2514,19 +2739,28 @@ class WriteCanvasBlockView(
             val now = System.currentTimeMillis()
             when (action) {
                 MotionEvent.ACTION_DOWN -> {
+                    if (OnyxEInkBridge.isEInkDevice) {
+                        laserTrailPoints.clear()
+                        OnyxEInkBridge.enterFastPanMode(this)
+                    }
                     laserTrailPoints.add(LaserPt(cx, cy, now, newSegment = true))
                     onLaserPoint?.invoke(cx, cy)
-                    postInvalidateOnAnimation()
+                    if (OnyxEInkBridge.isEInkDevice) invalidate() else postInvalidateOnAnimation()
                     return true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     laserTrailPoints.add(LaserPt(cx, cy, now, newSegment = false))
                     onLaserPoint?.invoke(cx, cy)
-                    postInvalidateOnAnimation()
+                    if (OnyxEInkBridge.isEInkDevice) invalidate() else postInvalidateOnAnimation()
                     return true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    postInvalidateOnAnimation()
+                    if (OnyxEInkBridge.isEInkDevice) {
+                        laserTrailPoints.clear()
+                        OnyxEInkBridge.exitFastPanModeAndRefresh(this)
+                    } else {
+                        postInvalidateOnAnimation()
+                    }
                     return true
                 }
             }
@@ -2534,10 +2768,16 @@ class WriteCanvasBlockView(
         }
 
         // 5. Standard Pen / Highlighter / Line-Drawing / Grid-Snapped / Hold-to-Snap Drawing
+        // If Onyx TouchHelper direct-to-EPD raw drawing is actively handling the stylus stroke,
+        // skip duplicate recording here.
+        if (isOnyxRawStrokeInProgress) {
+            return true
+        }
         val snappedX = snapX(cx)
         val snappedY = snapY(cy)
         when (action) {
             MotionEvent.ACTION_DOWN -> {
+                OnyxEInkBridge.enterFastPanMode(this)
                 liveStrokeStartX = snappedX
                 liveStrokeStartY = snappedY
                 liveStrokeLastX = snappedX
@@ -2671,59 +2911,63 @@ class WriteCanvasBlockView(
                 }
                 activeLiveStrokePath = null
                 predictedTipPath.reset()
-
-                val dims = tmpDimsAndDirty6
-                dims.fill(0)
-                val pathXml = if (nativeHandle != 0L) {
-                    WriteNativeBridge.nativeEndStroke(nativeHandle, dims)
-                } else {
-                    "<path class=\"ug-path\" />"
-                }
-
-                val oldW = canvasWidthPx
-                val oldH = canvasHeightPx
-                var sizeExpanded = false
-                if (dims[0] > canvasWidthPx) {
-                    canvasWidthPx = dims[0]
-                    sizeExpanded = true
-                }
-                val newHeight = if (dims[1] > 0) dims[1] else canvasHeightPx
-                if (newHeight > canvasHeightPx) {
-                    canvasHeightPx = newHeight
-                    sizeExpanded = true
-                    onHeightExpanded(newHeight)
-                }
-
-                if (nativeHandle != 0L) {
-                    if (!sizeExpanded && dims[4] >= dims[2] && dims[5] >= dims[3]) {
-                        refreshDirtyRect(
-                            dims[2].toFloat(),
-                            dims[3].toFloat(),
-                            dims[4].toFloat(),
-                            dims[5].toFloat(),
-                            notifyState = true
-                        )
-                    } else if (sizeExpanded && dims[4] >= dims[2] && dims[5] >= dims[3]) {
-                        expandBackingBitmapOrRefresh(
-                            oldW,
-                            oldH,
-                            dims[2].toFloat(),
-                            dims[3].toFloat(),
-                            dims[4].toFloat(),
-                            dims[5].toFloat()
-                        )
-                    } else {
-                        refreshBackingBitmap()
-                    }
-                } else {
-                    invalidate()
-                }
-
-                onStrokeCommitted(pathXml, canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
+                finalizeActiveNativeStroke()
+                OnyxEInkBridge.exitFastPanModeAndRefresh(this)
                 return true
             }
         }
         return super.onTouchEvent(event)
+    }
+
+    private fun finalizeActiveNativeStroke() {
+        val dims = tmpDimsAndDirty6
+        dims.fill(0)
+        val pathXml = if (nativeHandle != 0L) {
+            WriteNativeBridge.nativeEndStroke(nativeHandle, dims)
+        } else {
+            "<path class=\"ug-path\" />"
+        }
+
+        val oldW = canvasWidthPx
+        val oldH = canvasHeightPx
+        var sizeExpanded = false
+        if (dims[0] > canvasWidthPx) {
+            canvasWidthPx = dims[0]
+            sizeExpanded = true
+        }
+        val newHeight = if (dims[1] > 0) dims[1] else canvasHeightPx
+        if (newHeight > canvasHeightPx) {
+            canvasHeightPx = newHeight
+            sizeExpanded = true
+            onHeightExpanded(newHeight)
+        }
+
+        if (nativeHandle != 0L) {
+            if (!sizeExpanded && dims[4] >= dims[2] && dims[5] >= dims[3]) {
+                refreshDirtyRect(
+                    dims[2].toFloat(),
+                    dims[3].toFloat(),
+                    dims[4].toFloat(),
+                    dims[5].toFloat(),
+                    notifyState = true
+                )
+            } else if (sizeExpanded && dims[4] >= dims[2] && dims[5] >= dims[3]) {
+                expandBackingBitmapOrRefresh(
+                    oldW,
+                    oldH,
+                    dims[2].toFloat(),
+                    dims[3].toFloat(),
+                    dims[4].toFloat(),
+                    dims[5].toFloat()
+                )
+            } else {
+                refreshBackingBitmap()
+            }
+        } else {
+            invalidate()
+        }
+
+        onStrokeCommitted(pathXml, canvasWidthPx, canvasHeightPx, createDeferredSvgzExporter())
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -2785,30 +3029,42 @@ class WriteCanvasBlockView(
             }
         }
 
-        // Ephemeral Laser Pointer trail (fades out over 1500ms)
+        // Ephemeral Laser Pointer trail (fades out over 1500ms on LCD; solid crisp line on E-Ink)
         if (laserTrailPoints.isNotEmpty()) {
-            val now = System.currentTimeMillis()
-            laserTrailPoints.removeAll { now - it.timeMs > 1500L }
-            if (laserTrailPoints.isNotEmpty()) {
+            if (OnyxEInkBridge.isEInkDevice) {
+                laserCorePaint.alpha = 255
                 for (i in 1 until laserTrailPoints.size) {
                     val p0 = laserTrailPoints[i - 1]
                     val p1 = laserTrailPoints[i]
                     if (p1.newSegment) continue
-                    val age = (now - p1.timeMs).coerceIn(0L, 1500L)
-                    val alphaFrac = 1f - (age / 1500f)
-                    laserGlowPaint.alpha = (alphaFrac * 110).toInt().coerceIn(0, 255)
-                    laserCorePaint.alpha = (alphaFrac * 255).toInt().coerceIn(0, 255)
-                    canvas.drawLine(p0.x, p0.y, p1.x, p1.y, laserGlowPaint)
                     canvas.drawLine(p0.x, p0.y, p1.x, p1.y, laserCorePaint)
                 }
                 val tip = laserTrailPoints.last()
-                if (now - tip.timeMs < 400L) {
-                    laserGlowPaint.alpha = 160
-                    laserCorePaint.alpha = 255
-                    canvas.drawCircle(tip.x, tip.y, 9f, laserGlowPaint)
-                    canvas.drawCircle(tip.x, tip.y, 4.5f, laserCorePaint)
+                canvas.drawCircle(tip.x, tip.y, 4.5f, laserCorePaint)
+            } else {
+                val now = System.currentTimeMillis()
+                laserTrailPoints.removeAll { now - it.timeMs > 1500L }
+                if (laserTrailPoints.isNotEmpty()) {
+                    for (i in 1 until laserTrailPoints.size) {
+                        val p0 = laserTrailPoints[i - 1]
+                        val p1 = laserTrailPoints[i]
+                        if (p1.newSegment) continue
+                        val age = (now - p1.timeMs).coerceIn(0L, 1500L)
+                        val alphaFrac = 1f - (age / 1500f)
+                        laserGlowPaint.alpha = (alphaFrac * 110).toInt().coerceIn(0, 255)
+                        laserCorePaint.alpha = (alphaFrac * 255).toInt().coerceIn(0, 255)
+                        canvas.drawLine(p0.x, p0.y, p1.x, p1.y, laserGlowPaint)
+                        canvas.drawLine(p0.x, p0.y, p1.x, p1.y, laserCorePaint)
+                    }
+                    val tip = laserTrailPoints.last()
+                    if (now - tip.timeMs < 400L) {
+                        laserGlowPaint.alpha = 160
+                        laserCorePaint.alpha = 255
+                        canvas.drawCircle(tip.x, tip.y, 9f, laserGlowPaint)
+                        canvas.drawCircle(tip.x, tip.y, 4.5f, laserCorePaint)
+                    }
+                    postInvalidateOnAnimation()
                 }
-                postInvalidateOnAnimation()
             }
         }
 
@@ -2935,6 +3191,7 @@ class WriteCanvasBlockView(
                 nativeHandle = WriteNativeBridge.nativeCreateSession(
                     canvasWidthPx, canvasHeightPx, xRuling, yRuling
                 )
+                applyEInkPaperDefaultsIfNeeded()
                 WriteNativeBridge.nativeSetRenderTheme(nativeHandle, isDarkTheme, darkBgColorArgb, darkFgColorArgb)
                 WriteNativeBridge.nativeSetPen(
                     nativeHandle,
@@ -2950,13 +3207,21 @@ class WriteCanvasBlockView(
                 if (!savedB64.isNullOrEmpty()) {
                     val bytes = Base64.decode(savedB64, Base64.DEFAULT)
                     WriteNativeBridge.nativeLoadSvgz(nativeHandle, bytes)
+                    applyEInkPaperDefaultsIfNeeded()
                 }
                 refreshBackingBitmap()
             }
         }
+        if (OnyxEInkBridge.isEInkDevice && onyxRawSession == null) {
+            onyxRawSession = OnyxEInkBridge.OnyxRawTouchSession.createIfSupported(this, onyxRawStrokeListener)
+            syncOnyxRawDrawingState()
+        }
     }
 
     override fun onDetachedFromWindow() {
+        isOnyxRawStrokeInProgress = false
+        onyxRawSession?.close()
+        onyxRawSession = null
         super.onDetachedFromWindow()
         synchronized(nativeLock) {
             if (adoptedPeer?.adoptedPeer === this) {

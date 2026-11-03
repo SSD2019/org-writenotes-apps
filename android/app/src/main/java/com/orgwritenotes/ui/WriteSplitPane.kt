@@ -1,6 +1,7 @@
 package com.orgwritenotes.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,6 +28,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.orgwritenotes.ink.OnyxEInkBridge
 import com.orgwritenotes.ink.StylusToolMode
 import com.orgwritenotes.ink.WriteCanvasBlockView
 import com.orgwritenotes.model.ChecklistState
@@ -56,11 +58,16 @@ fun WriteSplitPane(
     syncClient: EmacsSyncClient,
     modifier: Modifier = Modifier
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     val snapshot by syncClient.activeSnapshot.collectAsState()
     val blocks = snapshot?.takeIf { it.nodeId == nodeId }?.blocks.orEmpty()
     val otherSketches = blocks.filterIsInstance<OrgBlock.InkCanvasBlock>().filter { it.fileName != currentFileName }
 
-    Column(modifier = modifier.background(Color(0xF2111827))) {
+    Column(
+        modifier = modifier
+            .background(if (isEInk) Color.White else Color(0xF2111827))
+            .border(if (isEInk) 1.dp else 0.dp, if (isEInk) Color.Black else Color.Transparent)
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -83,7 +90,11 @@ fun WriteSplitPane(
             is SplitTarget.Sketch -> {
                 val block = otherSketches.firstOrNull { it.fileName == target.fileName }
                 if (block == null) {
-                    Text("Sketch not found in this node.", color = Color(0xFF94A3B8), modifier = Modifier.padding(12.dp))
+                    Text(
+                        "Sketch not found in this node.",
+                        color = if (isEInk) Color.Black else Color(0xFF94A3B8),
+                        modifier = Modifier.padding(12.dp)
+                    )
                 } else {
                     SketchPane(nodeId, block, syncClient)
                 }
@@ -94,9 +105,14 @@ fun WriteSplitPane(
 
 @Composable
 private fun PaneTab(label: String, selected: Boolean, description: String, onClick: () -> Unit) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     Text(
         text = label,
-        color = if (selected) Color(0xFF38BDF8) else Color(0xFFCBD5E1),
+        color = when {
+            isEInk -> Color.Black
+            selected -> Color(0xFF38BDF8)
+            else -> Color(0xFFCBD5E1)
+        },
         fontSize = 12.sp,
         fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
         modifier = Modifier
@@ -108,15 +124,21 @@ private fun PaneTab(label: String, selected: Boolean, description: String, onCli
 
 @Composable
 private fun TextPane(blocks: List<OrgBlock>) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
+    val textColor = if (isEInk) Color.Black else Color(0xFFE2E8F0)
     val textBlocks = blocks.filter { it !is OrgBlock.InkCanvasBlock }
     if (textBlocks.isEmpty()) {
-        Text("This node has no text.", color = Color(0xFF94A3B8), modifier = Modifier.padding(12.dp))
+        Text(
+            "This node has no text.",
+            color = if (isEInk) Color(0xFF334155) else Color(0xFF94A3B8),
+            modifier = Modifier.padding(12.dp)
+        )
         return
     }
     LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         items(textBlocks) { b ->
             when (b) {
-                is OrgBlock.ParagraphBlock -> Text(b.text, color = Color(0xFFE2E8F0), fontSize = 14.sp)
+                is OrgBlock.ParagraphBlock -> Text(b.text, color = textColor, fontSize = 14.sp)
                 is OrgBlock.ChecklistBlock -> Column {
                     b.items.forEach {
                         val box = when (it.state) {
@@ -124,14 +146,17 @@ private fun TextPane(blocks: List<OrgBlock>) {
                             ChecklistState.PARTIAL -> "◪"
                             ChecklistState.UNCHECKED -> "☐"
                         }
-                        Text("$box ${it.text}", color = Color(0xFFE2E8F0), fontSize = 14.sp)
+                        Text("$box ${it.text}", color = textColor, fontSize = 14.sp)
                     }
                 }
                 is OrgBlock.CodeBlock -> Text(
-                    b.code, color = Color(0xFFA7F3D0), fontSize = 12.sp, fontFamily = FontFamily.Monospace
+                    b.code,
+                    color = if (isEInk) Color.Black else Color(0xFFA7F3D0),
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace
                 )
                 is OrgBlock.TableBlock -> Column {
-                    b.rows.forEach { row -> Text(row.joinToString("  |  "), color = Color(0xFFE2E8F0), fontSize = 13.sp) }
+                    b.rows.forEach { row -> Text(row.joinToString("  |  "), color = textColor, fontSize = 13.sp) }
                 }
                 is OrgBlock.InkCanvasBlock -> Unit
             }
@@ -141,8 +166,10 @@ private fun TextPane(blocks: List<OrgBlock>) {
 
 @Composable
 private fun SketchPane(nodeId: String, block: OrgBlock.InkCanvasBlock, syncClient: EmacsSyncClient) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     var ref by remember(block.fileName) { mutableStateOf<WriteCanvasBlockView?>(null) }
     val emacsTheme by syncClient.emacsTheme.collectAsState()
+    val effectiveDark = if (isEInk) false else emacsTheme.isDark
     val bgArgb = remember(emacsTheme) { emacsTheme.resolvedDarkBgArgb() }
     val fgArgb = remember(emacsTheme) { emacsTheme.resolvedDarkFgArgb() }
     AndroidView(
@@ -163,14 +190,18 @@ private fun SketchPane(nodeId: String, block: OrgBlock.InkCanvasBlock, syncClien
                     syncClient.flushPendingInkCommit(nodeId, block.fileName, w, h, b64)
                 }
             ).apply {
-                setAdaptiveTheme(emacsTheme.isDark, bgArgb, fgArgb)
+                setAdaptiveTheme(effectiveDark, bgArgb, fgArgb)
                 loadFromBase64Svgz(block.svgzBase64)
-                configureTool(StylusToolMode.PEN, 0xFF1E293B.toInt(), 2.6f)
+                configureTool(
+                    StylusToolMode.PEN,
+                    if (isEInk) 0xFF000000.toInt() else 0xFF1E293B.toInt(),
+                    2.6f
+                )
                 ref = this
             }
         },
         update = { view ->
-            view.setAdaptiveTheme(emacsTheme.isDark, bgArgb, fgArgb)
+            view.setAdaptiveTheme(effectiveDark, bgArgb, fgArgb)
         }
     )
 }

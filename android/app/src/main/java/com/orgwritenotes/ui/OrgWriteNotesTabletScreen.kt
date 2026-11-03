@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.orgwritenotes.ink.OnyxEInkBridge
 import com.orgwritenotes.ink.StylusToolMode
 import com.orgwritenotes.ink.WriteCanvasBlockView
 import com.orgwritenotes.ink.WritePageSetupState
@@ -176,13 +177,14 @@ fun OrgWriteNotesTabletScreen(
         }
     }
 
+    val isEInk = OnyxEInkBridge.isEInkDevice
     val contentPadding = if (isPortrait) 12.dp else 20.dp
     val sidebarWidth = if (isPortrait) 290.dp else 310.dp
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0F172A))
+            .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF0F172A))
     ) {
         Row(modifier = Modifier.fillMaxSize()) {
             // 1. Docked Sidebar (when isPinned is true)
@@ -260,33 +262,15 @@ fun OrgWriteNotesTabletScreen(
 
         // 3. Auto-hide Overlay Drawer (active when !isPinned)
         if (!isPinned) {
-            AnimatedVisibility(
-                visible = isDrawerOpen,
-                enter = fadeIn(),
-                exit = fadeOut()
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.55f))
-                        .clickable { isDrawerOpen = false }
-                )
-            }
-
-            AnimatedVisibility(
-                visible = isDrawerOpen,
-                enter = slideInHorizontally(initialOffsetX = { -it }) + fadeIn(),
-                exit = slideOutHorizontally(targetOffsetX = { -it }) + fadeOut(),
-                modifier = Modifier.align(Alignment.CenterStart)
-            ) {
+            val drawerPanel: @Composable () -> Unit = {
                 Box(
                     modifier = Modifier
                         .width(320.dp)
                         .fillMaxHeight()
-                        .background(Color(0xFF1E293B))
+                        .background(if (isEInk) Color.White else Color(0xFF1E293B))
                         .border(
                             width = 1.dp,
-                            color = Color(0xFF334155),
+                            color = if (isEInk) Color.Black else Color(0xFF334155),
                             shape = RoundedCornerShape(topEnd = 16.dp, bottomEnd = 16.dp)
                         )
                         .clip(RoundedCornerShape(topEnd = 16.dp, bottomEnd = 16.dp))
@@ -337,6 +321,41 @@ fun OrgWriteNotesTabletScreen(
                     )
                 }
             }
+
+            if (isEInk) {
+                if (isDrawerOpen) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clickable { isDrawerOpen = false }
+                    )
+                    Box(modifier = Modifier.align(Alignment.CenterStart)) {
+                        drawerPanel()
+                    }
+                }
+            } else {
+                AnimatedVisibility(
+                    visible = isDrawerOpen,
+                    enter = fadeIn(),
+                    exit = fadeOut()
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.55f))
+                            .clickable { isDrawerOpen = false }
+                    )
+                }
+
+                AnimatedVisibility(
+                    visible = isDrawerOpen,
+                    enter = slideInHorizontally(initialOffsetX = { -it }) + fadeIn(),
+                    exit = slideOutHorizontally(targetOffsetX = { -it }) + fadeOut(),
+                    modifier = Modifier.align(Alignment.CenterStart)
+                ) {
+                    drawerPanel()
+                }
+            }
         }
 
         // 4. Full-Screen Zoomed Editor Overlay (rendered on top so inline views stay alive underneath)
@@ -378,7 +397,7 @@ fun OrgWriteNotesTabletScreen(
         var includeBlankSketch by remember { mutableStateOf(false) }
         AlertDialog(
             onDismissRequest = { showNewNodeDialog = false },
-            title = { Text("Create New Org Heading / Quick Capture", color = Color.White) },
+            title = { Text("Create New Org Heading / Quick Capture", color = if (isEInk) Color.Black else Color.White) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedTextField(
@@ -388,7 +407,7 @@ fun OrgWriteNotesTabletScreen(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    Text("Insertion Mode:", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                    Text("Insertion Mode:", color = if (isEInk) Color.Black else Color(0xFF94A3B8), fontSize = 12.sp)
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         listOf("child" to "Child Subheading", "sibling" to "Sibling", "capture" to "Quick Capture").forEach { (m, label) ->
                             FilterChip(
@@ -398,7 +417,7 @@ fun OrgWriteNotesTabletScreen(
                             )
                         }
                     }
-                    Text("TODO State:", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                    Text("TODO State:", color = if (isEInk) Color.Black else Color(0xFF94A3B8), fontSize = 12.sp)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         listOf("TODO", "NEXT", "IDEA").forEach { kw ->
                             FilterChip(
@@ -419,7 +438,7 @@ fun OrgWriteNotesTabletScreen(
                             onCheckedChange = { includeBlankSketch = it }
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Immediately attach blank .svgz sketch", color = Color(0xFFE2E8F0), fontSize = 13.sp)
+                        Text("Immediately attach blank .svgz sketch", color = if (isEInk) Color.Black else Color(0xFFE2E8F0), fontSize = 13.sp)
                     }
                 }
             },
@@ -444,18 +463,27 @@ fun OrgWriteNotesTabletScreen(
                 TextButton(onClick = { showNewNodeDialog = false }) {
                     Text("Cancel")
                 }
-            }
+            },
+            containerColor = if (isEInk) Color.White else Color(0xFF1E293B)
         )
     }
 }
 
-fun connectionDotColor(state: ConnectionState): Color = when (state) {
-    ConnectionState.CONNECTED_ADB -> Color(0xFF22C55E)
-    ConnectionState.CONNECTED_NETWORK -> Color(0xFF38BDF8)
-    ConnectionState.OFFLINE_CACHED -> Color(0xFFF59E0B)
-    ConnectionState.CONNECTING -> Color(0xFFFACC15)
-    ConnectionState.ERROR -> Color(0xFFEF4444)
-    ConnectionState.DISCONNECTED -> Color(0xFF94A3B8)
+fun connectionDotColor(state: ConnectionState): Color {
+    if (OnyxEInkBridge.isEInkDevice) {
+        return when (state) {
+            ConnectionState.CONNECTED_ADB, ConnectionState.CONNECTED_NETWORK -> Color.Black
+            else -> Color(0xFF64748B)
+        }
+    }
+    return when (state) {
+        ConnectionState.CONNECTED_ADB -> Color(0xFF22C55E)
+        ConnectionState.CONNECTED_NETWORK -> Color(0xFF38BDF8)
+        ConnectionState.OFFLINE_CACHED -> Color(0xFFF59E0B)
+        ConnectionState.CONNECTING -> Color(0xFFFACC15)
+        ConnectionState.ERROR -> Color(0xFFEF4444)
+        ConnectionState.DISCONNECTED -> Color(0xFF94A3B8)
+    }
 }
 
 @Composable
@@ -479,10 +507,12 @@ private fun RecentNodesSidebarContent(
     onTogglePin: () -> Unit,
     onClose: (() -> Unit)? = null
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF1E293B))
+            .background(if (isEInk) Color.White else Color(0xFF1E293B))
+            .then(if (isEInk && isPinned) Modifier.border(1.dp, Color.Black) else Modifier)
             .padding(16.dp)
     ) {
         // Top row: Connection status pill + Pin toggle / Close button
@@ -506,11 +536,15 @@ private fun RecentNodesSidebarContent(
                 modifier = Modifier
                     .size(36.dp)
                     .clip(RoundedCornerShape(8.dp))
-                    .background(if (isPinned) Color(0xFF0284C7) else Color(0xFF334155))
+                    .background(
+                        if (isEInk) (if (isPinned) Color(0xFFE2E8F0) else Color.White)
+                        else (if (isPinned) Color(0xFF0284C7) else Color(0xFF334155))
+                    )
+                    .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(8.dp)) else Modifier)
             ) {
                 WriteSvgIcon(
                     asset = WriteIconAsset.PIN,
-                    tint = if (isPinned) Color.White else Color(0xFF94A3B8),
+                    tint = if (isEInk) Color.Black else (if (isPinned) Color.White else Color(0xFF94A3B8)),
                     size = 18.dp
                 )
             }
@@ -522,11 +556,12 @@ private fun RecentNodesSidebarContent(
                     modifier = Modifier
                         .size(36.dp)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFF334155))
+                        .background(if (isEInk) Color.White else Color(0xFF334155))
+                        .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(8.dp)) else Modifier)
                 ) {
                     WriteSvgIcon(
                         asset = WriteIconAsset.CLOSE,
-                        tint = Color(0xFF94A3B8),
+                        tint = if (isEInk) Color.Black else Color(0xFF94A3B8),
                         size = 16.dp
                     )
                 }
@@ -548,24 +583,30 @@ private fun RecentNodesSidebarContent(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(8.dp))
-                .background(Color(0xFF0F172A))
+                .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF0F172A))
+                .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(8.dp)) else Modifier)
                 .padding(3.dp)
         ) {
             tabDefs.forEach { (idx, label) ->
+                val active = activeTab == idx
                 Box(
                     modifier = Modifier
                         .weight(1f)
                         .clip(RoundedCornerShape(6.dp))
-                        .background(if (activeTab == idx) Color(0xFF334155) else Color.Transparent)
+                        .background(
+                            if (isEInk) (if (active) Color.White else Color.Transparent)
+                            else (if (active) Color(0xFF334155) else Color.Transparent)
+                        )
+                        .then(if (isEInk && active) Modifier.border(1.dp, Color.Black, RoundedCornerShape(6.dp)) else Modifier)
                         .clickable { onTabChange(idx) }
                         .padding(vertical = 6.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
                         text = label,
-                        color = if (activeTab == idx) Color.White else Color(0xFF94A3B8),
+                        color = if (isEInk) Color.Black else (if (active) Color.White else Color(0xFF94A3B8)),
                         fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = if (active) FontWeight.Bold else FontWeight.SemiBold
                     )
                 }
             }
@@ -575,9 +616,10 @@ private fun RecentNodesSidebarContent(
                 modifier = Modifier
                     .size(28.dp)
                     .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0xFF0284C7))
+                    .background(if (isEInk) Color.White else Color(0xFF0284C7))
+                    .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(6.dp)) else Modifier)
             ) {
-                Text("＋", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                Text("＋", color = if (isEInk) Color.Black else Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
             }
         }
 
@@ -595,7 +637,7 @@ private fun RecentNodesSidebarContent(
                         4 -> "Filter sketch gallery..."
                         else -> "Filter pushed history..."
                     },
-                    color = Color(0xFF94A3B8),
+                    color = if (isEInk) Color(0xFF475569) else Color(0xFF94A3B8),
                     fontSize = 12.sp
                 )
             },
@@ -620,18 +662,19 @@ private fun RecentNodesSidebarContent(
                 },
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
-                color = Color(0xFF94A3B8)
+                color = if (isEInk) Color.Black else Color(0xFF94A3B8)
             )
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = if (isPinned) "Docked" else "Auto-hide",
                     fontSize = 10.sp,
-                    color = if (isPinned) Color(0xFF38BDF8) else Color(0xFFF59E0B),
+                    color = if (isEInk) Color.Black else (if (isPinned) Color(0xFF38BDF8) else Color(0xFFF59E0B)),
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier
                         .clip(RoundedCornerShape(4.dp))
-                        .background(Color(0xFF0F172A))
+                        .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF0F172A))
+                        .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(4.dp)) else Modifier)
                         .clickable { onTogglePin() }
                         .padding(horizontal = 6.dp, vertical = 3.dp)
                 )
@@ -641,7 +684,8 @@ private fun RecentNodesSidebarContent(
                     Text(
                         text = "Clear",
                         fontSize = 11.sp,
-                        color = Color(0xFF38BDF8),
+                        color = if (isEInk) Color.Black else Color(0xFF38BDF8),
+                        fontWeight = if (isEInk) FontWeight.Bold else FontWeight.Normal,
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
                             .clickable { onClearHistory() }
@@ -666,7 +710,7 @@ private fun RecentNodesSidebarContent(
             if (filteredGallery.isEmpty()) {
                 Text(
                     text = "No .svgz sketches found in buffer.",
-                    color = Color(0xFF64748B),
+                    color = if (isEInk) Color(0xFF334155) else Color(0xFF64748B),
                     fontSize = 12.sp,
                     modifier = Modifier.padding(top = 8.dp)
                 )
@@ -688,7 +732,7 @@ private fun RecentNodesSidebarContent(
                     3 -> "Type 2+ characters above to search Org headings and handwriting OCR."
                     else -> "No nodes pushed yet.\nRun M-x org-writenotes-push-node in Emacs."
                 },
-                color = Color(0xFF64748B),
+                color = if (isEInk) Color(0xFF334155) else Color(0xFF64748B),
                 fontSize = 12.sp,
                 lineHeight = 18.sp,
                 modifier = Modifier.padding(top = 8.dp)
@@ -718,12 +762,13 @@ private fun GalleryItemCard(
     item: OrgGalleryItem,
     onClick: () -> Unit
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .background(Color(0xFF0F172A))
-            .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
+            .background(if (isEInk) Color.White else Color(0xFF0F172A))
+            .border(1.dp, if (isEInk) Color.Black else Color(0xFF334155), RoundedCornerShape(8.dp))
             .clickable { onClick() }
             .padding(10.dp)
     ) {
@@ -734,7 +779,7 @@ private fun GalleryItemCard(
         ) {
             Text(
                 text = "🎨 ${item.fileName}",
-                color = Color(0xFF38BDF8),
+                color = if (isEInk) Color.Black else Color(0xFF38BDF8),
                 fontSize = 12.sp,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.SemiBold,
@@ -743,7 +788,7 @@ private fun GalleryItemCard(
             )
             Text(
                 text = "${item.width}×${item.height}",
-                color = Color(0xFF64748B),
+                color = if (isEInk) Color(0xFF334155) else Color(0xFF64748B),
                 fontSize = 10.sp,
                 fontFamily = FontFamily.Monospace
             )
@@ -751,7 +796,7 @@ private fun GalleryItemCard(
         Spacer(modifier = Modifier.height(4.dp))
         Text(
             text = item.nodeTitle,
-            color = Color(0xFFF1F5F9),
+            color = if (isEInk) Color.Black else Color(0xFFF1F5F9),
             fontSize = 13.sp,
             fontWeight = FontWeight.Medium,
             maxLines = 1
@@ -760,7 +805,7 @@ private fun GalleryItemCard(
             Spacer(modifier = Modifier.height(3.dp))
             Text(
                 text = "OCR: ${item.ocrText}",
-                color = Color(0xFF94A3B8),
+                color = if (isEInk) Color(0xFF334155) else Color(0xFF94A3B8),
                 fontSize = 11.sp,
                 maxLines = 2
             )
@@ -777,6 +822,7 @@ private fun ConnectionStatusPill(
     pendingOfflineCount: Int,
     onClick: () -> Unit
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     val conflicts = syncConflictCount.intValue
     val queueSuffix = (if (pendingOfflineCount > 0) " • $pendingOfflineCount queued" else "") +
         (if (conflicts > 0) " • ⚠ $conflicts conflict${if (conflicts > 1) "s" else ""}" else "")
@@ -795,7 +841,8 @@ private fun ConnectionStatusPill(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .background(Color(0xFF0F172A))
+            .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF0F172A))
+            .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(8.dp)) else Modifier)
             .clickable { onClick() }
             .padding(horizontal = 12.dp, vertical = 10.dp)
     ) {
@@ -808,7 +855,7 @@ private fun ConnectionStatusPill(
         Spacer(modifier = Modifier.width(10.dp))
         Text(
             text = label,
-            color = Color(0xFFE2E8F0),
+            color = if (isEInk) Color.Black else Color(0xFFE2E8F0),
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium
         )
@@ -823,7 +870,12 @@ private fun SidebarNodeRow(
     showAgendaDates: Boolean = false,
     onClick: () -> Unit
 ) {
-    val bgColor = if (isSelected) Color(0xFF334155) else Color.Transparent
+    val isEInk = OnyxEInkBridge.isEInkDevice
+    val bgColor = if (isEInk) {
+        if (isSelected) Color(0xFFE2E8F0) else Color.White
+    } else {
+        if (isSelected) Color(0xFF334155) else Color.Transparent
+    }
     val levelIndent = if (indentByLevel) ((summary.level - 1).coerceAtLeast(0) * 10).dp else 0.dp
     Column(
         modifier = Modifier
@@ -831,6 +883,11 @@ private fun SidebarNodeRow(
             .padding(start = levelIndent)
             .clip(RoundedCornerShape(8.dp))
             .background(bgColor)
+            .then(
+                if (isEInk && isSelected) Modifier.border(1.5.dp, Color.Black, RoundedCornerShape(8.dp))
+                else if (isEInk) Modifier.border(0.5.dp, Color(0xFFCBD5E1), RoundedCornerShape(8.dp))
+                else Modifier
+            )
             .clickable { onClick() }
             .padding(horizontal = 10.dp, vertical = 8.dp)
     ) {
@@ -844,8 +901,9 @@ private fun SidebarNodeRow(
             }
             Text(
                 text = summary.title,
-                color = Color(0xFFF8FAFC),
+                color = if (isEInk) Color.Black else Color(0xFFF8FAFC),
                 fontSize = 14.sp,
+                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                 maxLines = 1,
                 modifier = Modifier.weight(1f)
             )
@@ -853,7 +911,7 @@ private fun SidebarNodeRow(
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = "🎨${summary.sketchCount}",
-                    color = Color(0xFF38BDF8),
+                    color = if (isEInk) Color.Black else Color(0xFF38BDF8),
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace
                 )
@@ -865,7 +923,7 @@ private fun SidebarNodeRow(
                 summary.scheduled?.let {
                     Text(
                         text = "📅 $it",
-                        color = Color(0xFF38BDF8),
+                        color = if (isEInk) Color.Black else Color(0xFF38BDF8),
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace
                     )
@@ -873,7 +931,7 @@ private fun SidebarNodeRow(
                 summary.deadline?.let {
                     Text(
                         text = "⏰ $it",
-                        color = Color(0xFFF87171),
+                        color = if (isEInk) Color.Black else Color(0xFFF87171),
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace
                     )
@@ -892,6 +950,7 @@ private fun HybridNodeEditorPane(
     onOpenRecentNodes: () -> Unit = {},
     onZoomInkBlock: (String, WriteCanvasBlockView?) -> Unit
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     var showPropertiesDrawer by remember { mutableStateOf(false) }
     var isEditingTitle by remember { mutableStateOf(false) }
     var showPlanningDialog by remember { mutableStateOf<String?>(null) } // "scheduled", "deadline", or "tags"
@@ -914,13 +973,14 @@ private fun HybridNodeEditorPane(
     val canvasViews = remember(snapshot.nodeId) {
         mutableStateMapOf<String, WriteCanvasBlockView>()
     }
-    // Sync adaptive theme from Emacs to all active canvas views
+    // Sync adaptive theme from Emacs to all active canvas views (always light on E-Ink)
     val emacsTheme by syncClient.emacsTheme.collectAsState()
-    LaunchedEffect(emacsTheme, canvasViews.values.toList()) {
+    LaunchedEffect(emacsTheme, canvasViews.values.toList(), isEInk) {
+        val effectiveDark = !isEInk && emacsTheme.isDark
         val bgArgb = emacsTheme.resolvedDarkBgArgb()
         val fgArgb = emacsTheme.resolvedDarkFgArgb()
         canvasViews.values.forEach { view ->
-            view.setAdaptiveTheme(emacsTheme.isDark, bgArgb, fgArgb)
+            view.setAdaptiveTheme(effectiveDark, bgArgb, fgArgb)
         }
     }
 
@@ -930,7 +990,9 @@ private fun HybridNodeEditorPane(
     var lastSelectMode by remember(snapshot.nodeId) { mutableStateOf(StylusToolMode.SELECT_LASSO) }
     var lastInsertSpaceMode by remember(snapshot.nodeId) { mutableStateOf(StylusToolMode.INSERT_SPACE_RULED) }
     var showPenToolbar by remember(snapshot.nodeId) { mutableStateOf(true) }
-    var selectedColor by remember(snapshot.nodeId) { mutableStateOf(0xFF1E293B.toInt()) }
+    var selectedColor by remember(snapshot.nodeId) {
+        mutableStateOf(if (isEInk) 0xFF000000.toInt() else 0xFF1E293B.toInt())
+    }
     var selectedWidth by remember(snapshot.nodeId) { mutableStateOf(2.6f) }
     var selectedPenTip by remember(snapshot.nodeId) { mutableStateOf(WritePenTip.ROUND) }
     var chiselAngle by remember(snapshot.nodeId) { mutableStateOf(45f) }
@@ -1066,7 +1128,8 @@ private fun HybridNodeEditorPane(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xFF1E293B))
+                    .background(if (isEInk) Color.White else Color(0xFF1E293B))
+                    .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(12.dp)) else Modifier)
                     .pointerInput(snapshot.nodeId) {
                         detectTapGestures(
                             onLongPress = { offset ->
@@ -1087,12 +1150,13 @@ private fun HybridNodeEditorPane(
                 ) {
                     Text(
                         text = "↑ ${snapshot.header.breadcrumbs.joinToString(" › ")}",
-                        color = Color(0xFF38BDF8),
+                        color = if (isEInk) Color.Black else Color(0xFF38BDF8),
                         fontSize = 11.sp,
                         fontFamily = FontFamily.Monospace,
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
-                            .background(Color(0xFF0F172A))
+                            .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF0F172A))
+                            .then(if (isEInk) Modifier.border(0.5.dp, Color.Black, RoundedCornerShape(4.dp)) else Modifier)
                             .clickable(enabled = snapshot.header.parentNodeId != null) {
                                 snapshot.header.parentNodeId?.let { syncClient.fetchNode(it) }
                             }
@@ -1110,15 +1174,16 @@ private fun HybridNodeEditorPane(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFF334155))
+                            .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF334155))
+                            .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(8.dp)) else Modifier)
                             .clickable { onOpenRecentNodes() }
                             .padding(horizontal = 9.dp, vertical = 6.dp)
                     ) {
-                        WriteSvgIcon(asset = WriteIconAsset.MENU, tint = Color(0xFF38BDF8), size = 15.dp)
+                        WriteSvgIcon(asset = WriteIconAsset.MENU, tint = if (isEInk) Color.Black else Color(0xFF38BDF8), size = 15.dp)
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = "Nodes",
-                            color = Color(0xFFE2E8F0),
+                            color = if (isEInk) Color.Black else Color(0xFFE2E8F0),
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium
                         )
@@ -1140,7 +1205,7 @@ private fun HybridNodeEditorPane(
 
                 Text(
                     text = "[#${snapshot.header.priority ?: "B"}]",
-                    color = Color(0xFFF59E0B),
+                    color = if (isEInk) Color.Black else Color(0xFFF59E0B),
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier
@@ -1167,7 +1232,7 @@ private fun HybridNodeEditorPane(
                 } else {
                     Text(
                         text = snapshot.header.title,
-                        color = Color(0xFFF8FAFC),
+                        color = if (isEInk) Color.Black else Color(0xFFF8FAFC),
                         fontSize = 20.sp,
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier
@@ -1179,7 +1244,7 @@ private fun HybridNodeEditorPane(
                 snapshot.header.checkboxProgress?.let { prog ->
                     Text(
                         text = "[$prog]",
-                        color = Color(0xFF38BDF8),
+                        color = if (isEInk) Color.Black else Color(0xFF38BDF8),
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(horizontal = 8.dp)
@@ -1189,7 +1254,7 @@ private fun HybridNodeEditorPane(
                 TextButton(onClick = { showPropertiesDrawer = !showPropertiesDrawer }) {
                     Text(
                         text = if (showPropertiesDrawer) "▾ :PROPERTIES:" else "▸ :PROPERTIES:",
-                        color = Color(0xFF94A3B8),
+                        color = if (isEInk) Color.Black else Color(0xFF94A3B8),
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp
                     )
@@ -1206,12 +1271,13 @@ private fun HybridNodeEditorPane(
                 val schedLabel = snapshot.header.scheduled?.let { "📅 Sched: $it" } ?: "📅 + Schedule"
                 Text(
                     text = schedLabel,
-                    color = if (snapshot.header.scheduled != null) Color(0xFF38BDF8) else Color(0xFF64748B),
+                    color = if (isEInk) Color.Black else (if (snapshot.header.scheduled != null) Color(0xFF38BDF8) else Color(0xFF64748B)),
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .background(Color(0xFF0F172A))
+                        .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF0F172A))
+                        .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(6.dp)) else Modifier)
                         .clickable { showPlanningDialog = "scheduled" }
                         .padding(horizontal = 8.dp, vertical = 4.dp)
                 )
@@ -1219,12 +1285,13 @@ private fun HybridNodeEditorPane(
                 val deadlLabel = snapshot.header.deadline?.let { "⏰ Due: $it" } ?: "⏰ + Deadline"
                 Text(
                     text = deadlLabel,
-                    color = if (snapshot.header.deadline != null) Color(0xFFF87171) else Color(0xFF64748B),
+                    color = if (isEInk) Color.Black else (if (snapshot.header.deadline != null) Color(0xFFF87171) else Color(0xFF64748B)),
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .background(Color(0xFF0F172A))
+                        .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF0F172A))
+                        .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(6.dp)) else Modifier)
                         .clickable { showPlanningDialog = "deadline" }
                         .padding(horizontal = 8.dp, vertical = 4.dp)
                 )
@@ -1236,12 +1303,13 @@ private fun HybridNodeEditorPane(
                 }
                 Text(
                     text = tagsLabel,
-                    color = if (snapshot.header.tags.isNotEmpty()) Color(0xFFA78BFA) else Color(0xFF64748B),
+                    color = if (isEInk) Color.Black else (if (snapshot.header.tags.isNotEmpty()) Color(0xFFA78BFA) else Color(0xFF64748B)),
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .background(Color(0xFF0F172A))
+                        .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF0F172A))
+                        .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(6.dp)) else Modifier)
                         .clickable { showPlanningDialog = "tags" }
                         .padding(horizontal = 8.dp, vertical = 4.dp)
                 )
@@ -1257,13 +1325,17 @@ private fun HybridNodeEditorPane(
                 }
                 Text(
                     text = clockLabel,
-                    color = if (snapshot.header.clockedIn) Color(0xFF22C55E) else Color(0xFF94A3B8),
+                    color = if (isEInk) Color.Black else (if (snapshot.header.clockedIn) Color(0xFF22C55E) else Color(0xFF94A3B8)),
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = if (snapshot.header.clockedIn) FontWeight.Bold else FontWeight.Normal,
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .background(if (snapshot.header.clockedIn) Color(0xFF064E3B) else Color(0xFF0F172A))
+                        .background(
+                            if (isEInk) (if (snapshot.header.clockedIn) Color(0xFFE2E8F0) else Color(0xFFF1F5F9))
+                            else (if (snapshot.header.clockedIn) Color(0xFF064E3B) else Color(0xFF0F172A))
+                        )
+                        .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(6.dp)) else Modifier)
                         .clickable {
                             if (snapshot.header.clockedIn) {
                                 syncClient.clockOut(snapshot.nodeId)
@@ -1304,11 +1376,7 @@ private fun HybridNodeEditorPane(
         if (activeInkBlock != null) {
             Spacer(modifier = Modifier.height(8.dp))
 
-            AnimatedVisibility(
-                visible = isToolbarVisible,
-                enter = expandVertically() + fadeIn(),
-                exit = shrinkVertically() + fadeOut()
-            ) {
+            val toolbarContent: @Composable () -> Unit = {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     WriteSharedToolbarChrome(
                         activeFileName = activeInkBlock.fileName,
@@ -1451,10 +1519,12 @@ private fun HybridNodeEditorPane(
                             wakeUpToolbar()
                             activeCanvasView?.deleteSelectedStrokes()
                         },
-                        isDarkCanvasTheme = emacsTheme.isDark,
-                        onToggleDarkCanvasTheme = {
-                            wakeUpToolbar()
-                            syncClient.toggleCanvasDarkMode()
+                        isDarkCanvasTheme = !isEInk && emacsTheme.isDark,
+                        onToggleDarkCanvasTheme = if (isEInk) null else {
+                            {
+                                wakeUpToolbar()
+                                syncClient.toggleCanvasDarkMode()
+                            }
                         },
                         onUserInteracted = { wakeUpToolbar() }
                     )
@@ -1517,20 +1587,30 @@ private fun HybridNodeEditorPane(
                 }
             }
 
+            if (isEInk) {
+                if (isToolbarVisible) {
+                    toolbarContent()
+                }
+            } else {
+                AnimatedVisibility(
+                    visible = isToolbarVisible,
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut()
+                ) {
+                    toolbarContent()
+                }
+            }
+
             // Sleek collapsed pill when the Write toolbar is auto-hidden
-            AnimatedVisibility(
-                visible = !isToolbarVisible,
-                enter = fadeIn(),
-                exit = fadeOut()
-            ) {
+            val collapsedPillContent: @Composable () -> Unit = {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFF1E293B))
-                        .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
+                        .background(if (isEInk) Color.White else Color(0xFF1E293B))
+                        .border(1.dp, if (isEInk) Color.Black else Color(0xFF334155), RoundedCornerShape(8.dp))
                         .clickable { wakeUpToolbar() }
                         .padding(horizontal = 12.dp, vertical = 6.dp)
                 ) {
@@ -1540,12 +1620,12 @@ private fun HybridNodeEditorPane(
                                 .size(10.dp)
                                 .clip(CircleShape)
                                 .background(Color(selectedColor))
-                                .border(1.dp, Color.White, CircleShape)
+                                .border(1.dp, if (isEInk) Color.Black else Color.White, CircleShape)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = "✎ Write Tools — Touch drawing with S-Pen or tap to show toolbar",
-                            color = Color(0xFF94A3B8),
+                            color = if (isEInk) Color.Black else Color(0xFF94A3B8),
                             fontSize = 12.sp
                         )
                     }
@@ -1554,19 +1634,34 @@ private fun HybridNodeEditorPane(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .background(Color(0xFF0F172A))
+                            .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF0F172A))
+                            .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(6.dp)) else Modifier)
                             .clickable { onZoomInkBlock(activeInkBlock.fileName, activeCanvasView) }
                             .padding(horizontal = 8.dp, vertical = 3.dp)
                     ) {
-                        WriteSvgIcon(asset = WriteIconAsset.FULLSCREEN, tint = Color(0xFF38BDF8), size = 13.dp)
+                        WriteSvgIcon(asset = WriteIconAsset.FULLSCREEN, tint = if (isEInk) Color.Black else Color(0xFF38BDF8), size = 13.dp)
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
                             text = "Zoom",
-                            color = Color(0xFF38BDF8),
+                            color = if (isEInk) Color.Black else Color(0xFF38BDF8),
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold
                         )
                     }
+                }
+            }
+
+            if (isEInk) {
+                if (!isToolbarVisible) {
+                    collapsedPillContent()
+                }
+            } else {
+                AnimatedVisibility(
+                    visible = !isToolbarVisible,
+                    enter = fadeIn(),
+                    exit = fadeOut()
+                ) {
+                    collapsedPillContent()
                 }
             }
         }
@@ -1590,8 +1685,8 @@ private fun HybridNodeEditorPane(
                             .fillMaxWidth()
                             .heightIn(min = 220.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .border(1.dp, Color(0xFF334155), RoundedCornerShape(12.dp))
-                            .background(Color(0xFF0F172A).copy(alpha = 0.5f))
+                            .border(1.dp, if (isEInk) Color.Black else Color(0xFF334155), RoundedCornerShape(12.dp))
+                            .background(if (isEInk) Color.White else Color(0xFF0F172A).copy(alpha = 0.5f))
                             .pointerInput(snapshot.nodeId) {
                                 detectTapGestures(
                                     onTap = { offset ->
@@ -1609,13 +1704,13 @@ private fun HybridNodeEditorPane(
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(
                                 text = "No content in this heading yet",
-                                color = Color(0xFF64748B),
+                                color = if (isEInk) Color.Black else Color(0xFF64748B),
                                 fontSize = 14.sp
                             )
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
                                 text = "Press and hold anywhere to add a sketch",
-                                color = Color(0xFF475569),
+                                color = if (isEInk) Color(0xFF334155) else Color(0xFF475569),
                                 fontSize = 12.sp
                             )
                         }
@@ -1845,13 +1940,13 @@ private fun HybridNodeEditorPane(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(10.dp))
-                                .background(Color(0xFF1E293B))
-                                .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp))
+                                .background(if (isEInk) Color.White else Color(0xFF1E293B))
+                                .border(1.dp, if (isEInk) Color.Black else Color(0xFF334155), RoundedCornerShape(10.dp))
                                 .padding(12.dp)
                         ) {
                             Text(
                                 text = "SUBHEADINGS (${snapshot.subheadings.size})",
-                                color = Color(0xFF94A3B8),
+                                color = if (isEInk) Color.Black else Color(0xFF94A3B8),
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -1861,7 +1956,8 @@ private fun HybridNodeEditorPane(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .clip(RoundedCornerShape(6.dp))
-                                        .background(Color(0xFF0F172A))
+                                        .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF0F172A))
+                                        .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(6.dp)) else Modifier)
                                         .clickable { syncClient.fetchNode(sub.nodeId) }
                                         .padding(horizontal = 10.dp, vertical = 8.dp)
                                 ) {
@@ -1871,7 +1967,7 @@ private fun HybridNodeEditorPane(
                                     }
                                     Text(
                                         text = sub.title,
-                                        color = Color(0xFFF8FAFC),
+                                        color = if (isEInk) Color.Black else Color(0xFFF8FAFC),
                                         fontSize = 14.sp,
                                         fontWeight = FontWeight.Medium,
                                         modifier = Modifier.weight(1f)
@@ -1879,7 +1975,7 @@ private fun HybridNodeEditorPane(
                                     if (sub.sketchCount > 0) {
                                         Text(
                                             text = "🎨 ${sub.sketchCount}",
-                                            color = Color(0xFF38BDF8),
+                                            color = if (isEInk) Color.Black else Color(0xFF38BDF8),
                                             fontSize = 11.sp,
                                             fontFamily = FontFamily.Monospace
                                         )
@@ -1887,7 +1983,7 @@ private fun HybridNodeEditorPane(
                                     }
                                     Text(
                                         text = "›",
-                                        color = Color(0xFF64748B),
+                                        color = if (isEInk) Color.Black else Color(0xFF64748B),
                                         fontSize = 16.sp,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -1979,7 +2075,7 @@ private fun HybridNodeEditorPane(
             title = {
                 Text(
                     text = "Handwriting OCR — Convert Selection to Org Text",
-                    color = Color(0xFFF1F5F9),
+                    color = if (isEInk) Color.Black else Color(0xFFF1F5F9),
                     fontWeight = FontWeight.Bold,
                     fontSize = 16.sp
                 )
@@ -1988,7 +2084,7 @@ private fun HybridNodeEditorPane(
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         text = "Review or edit the recognized text before inserting into your Org node:",
-                        color = Color(0xFF94A3B8),
+                        color = if (isEInk) Color.Black else Color(0xFF94A3B8),
                         fontSize = 12.sp
                     )
                     OutlinedTextField(
@@ -2037,10 +2133,10 @@ private fun HybridNodeEditorPane(
             },
             dismissButton = {
                 TextButton(onClick = { showOcrDialog = false }) {
-                    Text("Cancel", color = Color(0xFF94A3B8))
+                    Text("Cancel", color = if (isEInk) Color.Black else Color(0xFF94A3B8))
                 }
             },
-            containerColor = Color(0xFF1E293B),
+            containerColor = if (isEInk) Color.White else Color(0xFF1E293B),
             shape = RoundedCornerShape(12.dp)
         )
     }
@@ -2065,7 +2161,7 @@ private fun HybridNodeEditorPane(
                         "deadline" -> "Set DEADLINE Date"
                         else -> "Edit Org Tags"
                     },
-                    color = Color.White
+                    color = if (isEInk) Color.Black else Color.White
                 )
             },
             text = {
@@ -2123,14 +2219,15 @@ private fun HybridNodeEditorPane(
                             }
                             showPlanningDialog = null
                         }) {
-                            Text("Clear", color = Color(0xFFF87171))
+                            Text("Clear", color = if (isEInk) Color.Black else Color(0xFFF87171))
                         }
                     }
                     TextButton(onClick = { showPlanningDialog = null }) {
                         Text("Cancel")
                     }
                 }
-            }
+            },
+            containerColor = if (isEInk) Color.White else Color(0xFF1E293B)
         )
     }
 }
@@ -2146,19 +2243,20 @@ private fun SketchInsertionPopupMenu(
     belowLabel: String = "＋ Add Sketch Here",
     aboveLabel: String = "＋ Add Sketch Above"
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     DropdownMenu(
         expanded = expanded,
         onDismissRequest = onDismissRequest,
         offset = offset,
         modifier = Modifier
-            .background(Color(0xFF0F172A), RoundedCornerShape(8.dp))
-            .border(1.dp, Color(0xFF38BDF8).copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+            .background(if (isEInk) Color.White else Color(0xFF0F172A), RoundedCornerShape(8.dp))
+            .border(1.dp, if (isEInk) Color.Black else Color(0xFF38BDF8).copy(alpha = 0.6f), RoundedCornerShape(8.dp))
     ) {
         DropdownMenuItem(
             text = {
                 Text(
                     text = belowLabel,
-                    color = Color(0xFF38BDF8),
+                    color = if (isEInk) Color.Black else Color(0xFF38BDF8),
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -2173,7 +2271,7 @@ private fun SketchInsertionPopupMenu(
                 text = {
                     Text(
                         text = aboveLabel,
-                        color = Color(0xFFCBD5E1),
+                        color = if (isEInk) Color.Black else Color(0xFFCBD5E1),
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium
                     )
@@ -2185,15 +2283,15 @@ private fun SketchInsertionPopupMenu(
             )
         }
         if (onDelete != null) {
-            HorizontalDivider(color = Color(0xFF334155))
+            HorizontalDivider(color = if (isEInk) Color.Black else Color(0xFF334155))
             DropdownMenuItem(
                 text = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        WriteSvgIcon(asset = WriteIconAsset.DELETE, tint = Color(0xFFEF4444), size = 14.dp)
+                        WriteSvgIcon(asset = WriteIconAsset.DELETE, tint = if (isEInk) Color.Black else Color(0xFFEF4444), size = 14.dp)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = "Delete Drawing",
-                            color = Color(0xFFEF4444),
+                            color = if (isEInk) Color.Black else Color(0xFFEF4444),
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Medium
                         )
@@ -2216,6 +2314,7 @@ private fun PropertiesDrawerPanel(
     deadline: String?,
     onSaveProperty: (String, String) -> Unit
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     var propKey by remember(nodeId) { mutableStateOf("") }
     var propVal by remember(nodeId) { mutableStateOf("") }
 
@@ -2223,7 +2322,8 @@ private fun PropertiesDrawerPanel(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .background(Color(0xFF0F172A))
+            .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF0F172A))
+            .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(8.dp)) else Modifier)
             .padding(12.dp)
     ) {
         if (scheduled != null || deadline != null) {
@@ -2232,7 +2332,7 @@ private fun PropertiesDrawerPanel(
                     scheduled?.let { "SCHEDULED: $it" },
                     deadline?.let { "DEADLINE: $it" }
                 ).joinToString("   "),
-                color = Color(0xFF38BDF8),
+                color = if (isEInk) Color.Black else Color(0xFF38BDF8),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 12.sp
             )
@@ -2242,7 +2342,7 @@ private fun PropertiesDrawerPanel(
         properties.forEach { (k, v) ->
             Text(
                 text = ":$k:  $v",
-                color = Color(0xFFCBD5E1),
+                color = if (isEInk) Color.Black else Color(0xFFCBD5E1),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 12.sp
             )
@@ -2292,6 +2392,7 @@ private fun ChecklistBlockCard(
     onInsertSketchBeforeBlock: () -> Unit,
     onAddItem: (String) -> Unit
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     var newItemText by remember(block.blockId) { mutableStateOf("") }
     var showCardMenu by remember(block.blockId) { mutableStateOf(false) }
     var cardMenuOffset by remember(block.blockId) { mutableStateOf(DpOffset.Zero) }
@@ -2304,7 +2405,8 @@ private fun ChecklistBlockCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
-                .background(Color(0xFF1E293B))
+                .background(if (isEInk) Color.White else Color(0xFF1E293B))
+                .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(10.dp)) else Modifier)
                 .pointerInput(block.blockId) {
                     detectTapGestures(
                         onLongPress = { offset ->
@@ -2348,7 +2450,7 @@ private fun ChecklistBlockCard(
                         if (isPartial) {
                             Text(
                                 text = "[-]",
-                                color = Color(0xFFF59E0B),
+                                color = if (isEInk) Color.Black else Color(0xFFF59E0B),
                                 fontSize = 12.sp,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Bold
@@ -2358,10 +2460,14 @@ private fun ChecklistBlockCard(
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = item.text,
-                            color = when {
-                                checked -> Color(0xFF94A3B8)
-                                isPartial -> Color(0xFFFDE68A)
-                                else -> Color(0xFFF1F5F9)
+                            color = if (isEInk) {
+                                if (checked) Color(0xFF475569) else Color.Black
+                            } else {
+                                when {
+                                    checked -> Color(0xFF94A3B8)
+                                    isPartial -> Color(0xFFFDE68A)
+                                    else -> Color(0xFFF1F5F9)
+                                }
                             },
                             textDecoration = if (checked) TextDecoration.LineThrough else TextDecoration.None,
                             fontSize = 15.sp,
@@ -2371,7 +2477,7 @@ private fun ChecklistBlockCard(
                             onClick = { showItemMenu = true },
                             modifier = Modifier.size(28.dp)
                         ) {
-                            Text("⋯", color = Color(0xFF64748B), fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                            Text("⋯", color = if (isEInk) Color.Black else Color(0xFF64748B), fontSize = 14.sp, fontWeight = FontWeight.Bold)
                         }
                     }
 
@@ -2380,11 +2486,11 @@ private fun ChecklistBlockCard(
                         onDismissRequest = { showItemMenu = false },
                         offset = itemMenuOffset,
                         modifier = Modifier
-                            .background(Color(0xFF0F172A), RoundedCornerShape(8.dp))
-                            .border(1.dp, Color(0xFF38BDF8).copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                            .background(if (isEInk) Color.White else Color(0xFF0F172A), RoundedCornerShape(8.dp))
+                            .border(1.dp, if (isEInk) Color.Black else Color(0xFF38BDF8).copy(alpha = 0.6f), RoundedCornerShape(8.dp))
                     ) {
                         DropdownMenuItem(
-                            text = { Text("✎ Edit Item Text", color = Color(0xFFF1F5F9), fontSize = 13.sp) },
+                            text = { Text("✎ Edit Item Text", color = if (isEInk) Color.Black else Color(0xFFF1F5F9), fontSize = 13.sp) },
                             onClick = {
                                 showItemMenu = false
                                 editingItem = item
@@ -2392,50 +2498,50 @@ private fun ChecklistBlockCard(
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("[-] Set Partial / In-Progress", color = Color(0xFFF59E0B), fontSize = 13.sp) },
+                            text = { Text("[-] Set Partial / In-Progress", color = if (isEInk) Color.Black else Color(0xFFF59E0B), fontSize = 13.sp) },
                             onClick = {
                                 showItemMenu = false
                                 onSetPartial(item)
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("→ Indent Item", color = Color(0xFFCBD5E1), fontSize = 13.sp) },
+                            text = { Text("→ Indent Item", color = if (isEInk) Color.Black else Color(0xFFCBD5E1), fontSize = 13.sp) },
                             onClick = {
                                 showItemMenu = false
                                 onUpdateItem(item, null, 2, 0)
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("← Outdent Item", color = Color(0xFFCBD5E1), fontSize = 13.sp) },
+                            text = { Text("← Outdent Item", color = if (isEInk) Color.Black else Color(0xFFCBD5E1), fontSize = 13.sp) },
                             onClick = {
                                 showItemMenu = false
                                 onUpdateItem(item, null, -2, 0)
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("↑ Move Item Up", color = Color(0xFFCBD5E1), fontSize = 13.sp) },
+                            text = { Text("↑ Move Item Up", color = if (isEInk) Color.Black else Color(0xFFCBD5E1), fontSize = 13.sp) },
                             onClick = {
                                 showItemMenu = false
                                 onUpdateItem(item, null, 0, -1)
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("↓ Move Item Down", color = Color(0xFFCBD5E1), fontSize = 13.sp) },
+                            text = { Text("↓ Move Item Down", color = if (isEInk) Color.Black else Color(0xFFCBD5E1), fontSize = 13.sp) },
                             onClick = {
                                 showItemMenu = false
                                 onUpdateItem(item, null, 0, 1)
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("＋ Add Sketch Below Item", color = Color(0xFF38BDF8), fontSize = 13.sp) },
+                            text = { Text("＋ Add Sketch Below Item", color = if (isEInk) Color.Black else Color(0xFF38BDF8), fontSize = 13.sp) },
                             onClick = {
                                 showItemMenu = false
                                 onInsertSketchAfterItem(item)
                             }
                         )
-                        HorizontalDivider(color = Color(0xFF334155))
+                        HorizontalDivider(color = if (isEInk) Color.Black else Color(0xFF334155))
                         DropdownMenuItem(
-                            text = { Text("✕ Delete Checklist Item", color = Color(0xFFEF4444), fontSize = 13.sp) },
+                            text = { Text("✕ Delete Checklist Item", color = if (isEInk) Color.Black else Color(0xFFEF4444), fontSize = 13.sp) },
                             onClick = {
                                 showItemMenu = false
                                 onDeleteItem(item)
@@ -2451,7 +2557,7 @@ private fun ChecklistBlockCard(
                 OutlinedTextField(
                     value = newItemText,
                     onValueChange = { newItemText = it },
-                    placeholder = { Text("Add checklist item (- [ ] ...)", color = Color(0xFF64748B)) },
+                    placeholder = { Text("Add checklist item (- [ ] ...)", color = if (isEInk) Color(0xFF475569) else Color(0xFF64748B)) },
                     singleLine = true,
                     modifier = Modifier.weight(1f)
                 )
@@ -2482,7 +2588,7 @@ private fun ChecklistBlockCard(
         val targetItem = editingItem!!
         AlertDialog(
             onDismissRequest = { editingItem = null },
-            title = { Text("Edit Checklist Item", color = Color.White) },
+            title = { Text("Edit Checklist Item", color = if (isEInk) Color.Black else Color.White) },
             text = {
                 OutlinedTextField(
                     value = editingItemText,
@@ -2505,7 +2611,8 @@ private fun ChecklistBlockCard(
                 TextButton(onClick = { editingItem = null }) {
                     Text("Cancel")
                 }
-            }
+            },
+            containerColor = if (isEInk) Color.White else Color(0xFF1E293B)
         )
     }
 }
@@ -2517,6 +2624,7 @@ private fun CodeBlockCard(
     onInsertSketchAfterBlock: () -> Unit,
     onInsertSketchBeforeBlock: () -> Unit
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     val context = LocalContext.current
     var showMenu by remember(block.blockId) { mutableStateOf(false) }
     var menuOffset by remember(block.blockId) { mutableStateOf(DpOffset.Zero) }
@@ -2527,8 +2635,8 @@ private fun CodeBlockCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(8.dp))
-                .background(Color(0xFF0F172A))
-                .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
+                .background(if (isEInk) Color.White else Color(0xFF0F172A))
+                .border(1.dp, if (isEInk) Color.Black else Color(0xFF334155), RoundedCornerShape(8.dp))
                 .pointerInput(block.blockId) {
                     detectTapGestures(
                         onLongPress = { offset ->
@@ -2546,7 +2654,7 @@ private fun CodeBlockCard(
             ) {
                 Text(
                     text = "#+BEGIN_SRC ${block.language.ifEmpty { "text" }}",
-                    color = Color(0xFF38BDF8),
+                    color = if (isEInk) Color.Black else Color(0xFF38BDF8),
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold
@@ -2554,11 +2662,12 @@ private fun CodeBlockCard(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         text = "📋 Copy",
-                        color = Color(0xFF94A3B8),
+                        color = if (isEInk) Color.Black else Color(0xFF94A3B8),
                         fontSize = 11.sp,
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
-                            .background(Color(0xFF1E293B))
+                            .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF1E293B))
+                            .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(4.dp)) else Modifier)
                             .clickable {
                                 val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
                                 cm?.setPrimaryClip(android.content.ClipData.newPlainText("Org Src", block.code))
@@ -2567,12 +2676,13 @@ private fun CodeBlockCard(
                     )
                     Text(
                         text = "▶ Run Babel",
-                        color = Color(0xFF22C55E),
+                        color = if (isEInk) Color.Black else Color(0xFF22C55E),
                         fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
-                            .background(Color(0xFF064E3B))
+                            .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF064E3B))
+                            .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(4.dp)) else Modifier)
                             .clickable { onExecute() }
                             .padding(horizontal = 8.dp, vertical = 3.dp)
                     )
@@ -2581,7 +2691,7 @@ private fun CodeBlockCard(
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = block.code,
-                color = Color(0xFFE2E8F0),
+                color = if (isEInk) Color.Black else Color(0xFFE2E8F0),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 13.sp,
                 lineHeight = 19.sp,
@@ -2595,12 +2705,13 @@ private fun CodeBlockCard(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(6.dp))
-                        .background(Color(0xFF1E293B))
+                        .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF1E293B))
+                        .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(6.dp)) else Modifier)
                         .padding(8.dp)
                 ) {
                     Text(
                         text = "#+RESULTS:",
-                        color = Color(0xFF22C55E),
+                        color = if (isEInk) Color.Black else Color(0xFF22C55E),
                         fontFamily = FontFamily.Monospace,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold
@@ -2608,7 +2719,7 @@ private fun CodeBlockCard(
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = block.results,
-                        color = Color(0xFFCBD5E1),
+                        color = if (isEInk) Color.Black else Color(0xFFCBD5E1),
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp
                     )
@@ -2635,6 +2746,7 @@ private fun TableBlockCard(
     onInsertSketchAfterBlock: () -> Unit,
     onInsertSketchBeforeBlock: () -> Unit
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     var editingCell by remember(block.blockId) { mutableStateOf<Triple<Int, Int, String>?>(null) }
     var showMenu by remember(block.blockId) { mutableStateOf(false) }
     var menuOffset by remember(block.blockId) { mutableStateOf(DpOffset.Zero) }
@@ -2645,8 +2757,8 @@ private fun TableBlockCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(8.dp))
-                .background(Color(0xFF1E293B))
-                .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
+                .background(if (isEInk) Color.White else Color(0xFF1E293B))
+                .border(1.dp, if (isEInk) Color.Black else Color(0xFF334155), RoundedCornerShape(8.dp))
                 .pointerInput(block.blockId) {
                     detectTapGestures(
                         onLongPress = { offset ->
@@ -2662,14 +2774,17 @@ private fun TableBlockCard(
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
-                        .background(if (rIdx == 0) Color(0xFF0F172A) else Color.Transparent)
-                        .border(0.5.dp, Color(0xFF334155))
+                        .background(
+                            if (rIdx == 0) (if (isEInk) Color(0xFFE2E8F0) else Color(0xFF0F172A))
+                            else Color.Transparent
+                        )
+                        .border(0.5.dp, if (isEInk) Color.Black else Color(0xFF334155))
                 ) {
                     row.forEachIndexed { cIdx, cellVal ->
                         Box(
                             modifier = Modifier
                                 .widthIn(min = 90.dp)
-                                .border(0.5.dp, Color(0xFF334155))
+                                .border(0.5.dp, if (isEInk) Color.Black else Color(0xFF334155))
                                 .clickable {
                                     editingCell = Triple(rIdx, cIdx, cellVal)
                                 }
@@ -2677,7 +2792,7 @@ private fun TableBlockCard(
                         ) {
                             Text(
                                 text = cellVal,
-                                color = if (rIdx == 0) Color(0xFF38BDF8) else Color(0xFFE2E8F0),
+                                color = if (isEInk) Color.Black else (if (rIdx == 0) Color(0xFF38BDF8) else Color(0xFFE2E8F0)),
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 13.sp,
                                 fontWeight = if (rIdx == 0) FontWeight.Bold else FontWeight.Normal
@@ -2704,7 +2819,7 @@ private fun TableBlockCard(
         var draftVal by remember(rIdx, cIdx) { mutableStateOf(initialVal) }
         AlertDialog(
             onDismissRequest = { editingCell = null },
-            title = { Text("Edit Org Table Cell (${rIdx + 1}, ${cIdx + 1})", color = Color.White) },
+            title = { Text("Edit Org Table Cell (${rIdx + 1}, ${cIdx + 1})", color = if (isEInk) Color.Black else Color.White) },
             text = {
                 OutlinedTextField(
                     value = draftVal,
@@ -2725,7 +2840,8 @@ private fun TableBlockCard(
                 TextButton(onClick = { editingCell = null }) {
                     Text("Cancel")
                 }
-            }
+            },
+            containerColor = if (isEInk) Color.White else Color(0xFF1E293B)
         )
     }
 }
@@ -2762,6 +2878,7 @@ private fun InkCanvasBlockCard(
     onInsertSketchAfterBlock: () -> Unit,
     onInsertSketchBeforeBlock: () -> Unit
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     var canvasHeightPx by remember(block.blockId) { mutableStateOf(block.height) }
     var dragResizeDeltaPx by remember(block.blockId) { mutableStateOf(0) }
     var canvasViewRef by remember(block.blockId) { mutableStateOf<WriteCanvasBlockView?>(null) }
@@ -2773,15 +2890,16 @@ private fun InkCanvasBlockCard(
 
     val bgArgb = remember(emacsTheme) { emacsTheme.resolvedDarkBgArgb() }
     val fgArgb = remember(emacsTheme) { emacsTheme.resolvedDarkFgArgb() }
+    val effectiveDark = !isEInk && emacsTheme.isDark
 
-    LaunchedEffect(emacsTheme, canvasViewRef) {
-        canvasViewRef?.setAdaptiveTheme(emacsTheme.isDark, bgArgb, fgArgb)
+    LaunchedEffect(emacsTheme, canvasViewRef, isEInk) {
+        canvasViewRef?.setAdaptiveTheme(effectiveDark, bgArgb, fgArgb)
     }
 
     val density = LocalDensity.current
     val heightDp = with(density) { canvasHeightPx.toDp() }
 
-    val borderColor = if (isActiveDrawing) Color(0xFF38BDF8) else Color(0xFF334155)
+    val borderColor = if (isEInk) Color.Black else (if (isActiveDrawing) Color(0xFF38BDF8) else Color(0xFF334155))
     val borderWidth = if (isActiveDrawing) 1.5.dp else 1.dp
 
     Box {
@@ -2790,7 +2908,7 @@ private fun InkCanvasBlockCard(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
                 .border(borderWidth, borderColor, RoundedCornerShape(10.dp))
-                .background(Color(0xFF0F172A))
+                .background(if (isEInk) Color.White else Color(0xFF0F172A))
         ) {
         Box(
             modifier = Modifier
@@ -2850,7 +2968,7 @@ private fun InkCanvasBlockCard(
                             syncClient.sendLaserPoint(nodeId, block.fileName, lx, ly)
                         }
                     ).apply {
-                        setAdaptiveTheme(emacsTheme.isDark, bgArgb, fgArgb)
+                        setAdaptiveTheme(effectiveDark, bgArgb, fgArgb)
                         loadFromBase64Svgz(block.svgzBase64)
                         lastLoadedSvgzBase64 = block.svgzBase64
                         configureTool(
@@ -2869,7 +2987,7 @@ private fun InkCanvasBlockCard(
                 },
                 update = { view ->
                     onRegisterView(view)
-                    view.setAdaptiveTheme(emacsTheme.isDark, bgArgb, fgArgb)
+                    view.setAdaptiveTheme(effectiveDark, bgArgb, fgArgb)
                     if (block.svgzBase64 != lastLoadedSvgzBase64 && !block.svgzBase64.isNullOrEmpty()) {
                         lastLoadedSvgzBase64 = block.svgzBase64
                         if (block.svgzBase64 != view.lastSyncedSvgzBase64) {
@@ -2891,10 +3009,10 @@ private fun InkCanvasBlockCard(
                     .align(Alignment.TopEnd)
                     .padding(8.dp)
                     .clip(RoundedCornerShape(6.dp))
-                    .background(if (isActiveDrawing) Color(0xCC0F172A) else Color(0x991E293B))
+                    .background(if (isEInk) Color.White else (if (isActiveDrawing) Color(0xCC0F172A) else Color(0x991E293B)))
                     .border(
                         1.dp,
-                        if (isActiveDrawing) Color(0xFF38BDF8) else Color(0xFF475569),
+                        if (isEInk) Color.Black else (if (isActiveDrawing) Color(0xFF38BDF8) else Color(0xFF475569)),
                         RoundedCornerShape(6.dp)
                     )
                     .pointerInput(block.blockId) {
@@ -2913,7 +3031,7 @@ private fun InkCanvasBlockCard(
                 if (isActiveDrawing) {
                     Text(
                         text = "●",
-                        color = Color(0xFF38BDF8),
+                        color = if (isEInk) Color.Black else Color(0xFF38BDF8),
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.clickable {
@@ -2924,7 +3042,7 @@ private fun InkCanvasBlockCard(
                         modifier = Modifier
                             .width(1.dp)
                             .height(12.dp)
-                            .background(Color(0xFF475569))
+                            .background(if (isEInk) Color.Black else Color(0xFF475569))
                     )
                 }
                 Row(
@@ -2936,11 +3054,11 @@ private fun InkCanvasBlockCard(
                         }
                         .padding(horizontal = 2.dp)
                 ) {
-                    WriteSvgIcon(asset = WriteIconAsset.FULLSCREEN, tint = Color.White, size = 12.dp)
+                    WriteSvgIcon(asset = WriteIconAsset.FULLSCREEN, tint = if (isEInk) Color.Black else Color.White, size = 12.dp)
                     Spacer(modifier = Modifier.width(3.dp))
                     Text(
                         text = "Zoom",
-                        color = Color.White,
+                        color = if (isEInk) Color.Black else Color.White,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -2949,7 +3067,7 @@ private fun InkCanvasBlockCard(
                     modifier = Modifier
                         .width(1.dp)
                         .height(12.dp)
-                        .background(Color(0xFF475569))
+                        .background(if (isEInk) Color.Black else Color(0xFF475569))
                 )
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -2958,11 +3076,11 @@ private fun InkCanvasBlockCard(
                         .clickable { showDeleteConfirmDialog = true }
                         .padding(horizontal = 2.dp)
                 ) {
-                    WriteSvgIcon(asset = WriteIconAsset.DELETE, tint = Color(0xFFF87171), size = 12.dp)
+                    WriteSvgIcon(asset = WriteIconAsset.DELETE, tint = if (isEInk) Color.Black else Color(0xFFF87171), size = 12.dp)
                     Spacer(modifier = Modifier.width(3.dp))
                     Text(
                         text = "Delete",
-                        color = Color(0xFFF87171),
+                        color = if (isEInk) Color.Black else Color(0xFFF87171),
                         fontSize = 10.sp,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -2976,7 +3094,7 @@ private fun InkCanvasBlockCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(18.dp)
-                .background(Color(0xFF0F172A))
+                .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF0F172A))
                 .pointerInput(block.blockId) {
                     detectVerticalDragGestures(
                         onVerticalDrag = { change, dragAmount ->
@@ -3004,7 +3122,7 @@ private fun InkCanvasBlockCard(
                 val sign = if (dragResizeDeltaPx > 0) "+" else ""
                 Text(
                     text = "Height: ${targetHeight}px (${sign}${dragResizeDeltaPx}px)",
-                    color = Color(0xFF38BDF8),
+                    color = if (isEInk) Color.Black else Color(0xFF38BDF8),
                     fontSize = 10.sp,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -3014,7 +3132,7 @@ private fun InkCanvasBlockCard(
                         .width(42.dp)
                         .height(3.dp)
                         .clip(RoundedCornerShape(1.5.dp))
-                        .background(if (isActiveDrawing) Color(0xFF38BDF8) else Color(0xFF475569))
+                        .background(if (isEInk) Color.Black else (if (isActiveDrawing) Color(0xFF38BDF8) else Color(0xFF475569)))
                 )
             }
         }
@@ -3037,14 +3155,14 @@ private fun InkCanvasBlockCard(
             title = {
                 Text(
                     text = "Delete Image?",
-                    color = Color(0xFFF1F5F9),
+                    color = if (isEInk) Color.Black else Color(0xFFF1F5F9),
                     fontWeight = FontWeight.Bold
                 )
             },
             text = {
                 Text(
                     text = "Are you sure you want to delete this canvas?\nThis will remove it from the Org note and delete the file from disk.",
-                    color = Color(0xFF94A3B8),
+                    color = if (isEInk) Color.Black else Color(0xFF94A3B8),
                     fontSize = 14.sp
                 )
             },
@@ -3054,17 +3172,17 @@ private fun InkCanvasBlockCard(
                         showDeleteConfirmDialog = false
                         syncClient.deleteInkBlock(nodeId, block.fileName, block.linkText)
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626))
+                    colors = ButtonDefaults.buttonColors(containerColor = if (isEInk) Color.Black else Color(0xFFDC2626))
                 ) {
                     Text("Delete", color = Color.White, fontWeight = FontWeight.SemiBold)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirmDialog = false }) {
-                    Text("Cancel", color = Color(0xFF94A3B8))
+                    Text("Cancel", color = if (isEInk) Color.Black else Color(0xFF94A3B8))
                 }
             },
-            containerColor = Color(0xFF1E293B),
+            containerColor = if (isEInk) Color.White else Color(0xFF1E293B),
             shape = RoundedCornerShape(12.dp)
         )
     }
@@ -3079,6 +3197,7 @@ private fun ParagraphBlockCard(
     onInsertSketchAfterBlock: () -> Unit,
     onInsertSketchBeforeBlock: () -> Unit
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     var isEditing by remember(block.blockId) { mutableStateOf(false) }
     var showMenu by remember(block.blockId) { mutableStateOf(false) }
     var menuOffset by remember(block.blockId) { mutableStateOf(DpOffset.Zero) }
@@ -3098,7 +3217,8 @@ private fun ParagraphBlockCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(8.dp))
-                .background(Color(0xFF1E293B))
+                .background(if (isEInk) Color.White else Color(0xFF1E293B))
+                .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(8.dp)) else Modifier)
                 .then(
                     if (!isEditing) {
                         Modifier.pointerInput(block.blockId) {
@@ -3136,7 +3256,7 @@ private fun ParagraphBlockCard(
                             isEditing = false
                         }
                     ) {
-                        Text("+ Add Sketch at Cursor", color = Color(0xFF38BDF8))
+                        Text("+ Add Sketch at Cursor", color = if (isEInk) Color.Black else Color(0xFF38BDF8))
                     }
 
                     Row {
@@ -3164,7 +3284,7 @@ private fun ParagraphBlockCard(
                 ) {
                     Text(
                         text = block.text,
-                        color = Color(0xFFE2E8F0),
+                        color = if (isEInk) Color.Black else Color(0xFFE2E8F0),
                         fontSize = 15.sp,
                         lineHeight = 22.sp,
                         modifier = Modifier.weight(1f)
@@ -3172,12 +3292,12 @@ private fun ParagraphBlockCard(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = "✎ Edit / Split",
-                        color = Color(0xFF94A3B8),
+                        color = if (isEInk) Color.Black else Color(0xFF94A3B8),
                         fontSize = 11.sp,
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .background(Color(0xFF0F172A))
-                            .border(1.dp, Color(0xFF334155), RoundedCornerShape(6.dp))
+                            .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF0F172A))
+                            .border(1.dp, if (isEInk) Color.Black else Color(0xFF334155), RoundedCornerShape(6.dp))
                             .clickable { isEditing = true }
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     )
@@ -3199,20 +3319,27 @@ private fun ParagraphBlockCard(
 
 @Composable
 private fun TodoBadge(keyword: String) {
-    val bg = when (keyword) {
-        "DONE" -> Color(0xFF16A34A)
-        "NEXT" -> Color(0xFF2563EB)
-        else -> Color(0xFFD97706)
+    val isEInk = OnyxEInkBridge.isEInkDevice
+    val bg = if (isEInk) {
+        if (keyword == "DONE") Color.White else Color.Black
+    } else {
+        when (keyword) {
+            "DONE" -> Color(0xFF16A34A)
+            "NEXT" -> Color(0xFF2563EB)
+            else -> Color(0xFFD97706)
+        }
     }
+    val fg = if (isEInk && keyword == "DONE") Color.Black else Color.White
     Text(
         text = keyword,
-        color = Color.White,
+        color = fg,
         fontSize = 11.sp,
         fontWeight = FontWeight.Bold,
         fontFamily = FontFamily.Monospace,
         modifier = Modifier
             .clip(RoundedCornerShape(4.dp))
             .background(bg)
+            .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(4.dp)) else Modifier)
             .padding(horizontal = 6.dp, vertical = 2.dp)
     )
 }
@@ -3224,6 +3351,7 @@ private fun EmptyEditorPlaceholder(
     onOpenRecentNodes: () -> Unit = {},
     onConnectAdb: () -> Unit
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
@@ -3234,16 +3362,16 @@ private fun EmptyEditorPlaceholder(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0xFF1E293B))
-                    .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
+                    .background(if (isEInk) Color.White else Color(0xFF1E293B))
+                    .border(1.dp, if (isEInk) Color.Black else Color(0xFF334155), RoundedCornerShape(8.dp))
                     .clickable { onOpenRecentNodes() }
                     .padding(horizontal = 14.dp, vertical = 8.dp)
             ) {
-                WriteSvgIcon(asset = WriteIconAsset.MENU, tint = Color(0xFF38BDF8), size = 18.dp)
+                WriteSvgIcon(asset = WriteIconAsset.MENU, tint = if (isEInk) Color.Black else Color(0xFF38BDF8), size = 18.dp)
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     text = "Open Recent Nodes",
-                    color = Color(0xFFE2E8F0),
+                    color = if (isEInk) Color.Black else Color(0xFFE2E8F0),
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium
                 )
@@ -3260,14 +3388,14 @@ private fun EmptyEditorPlaceholder(
 
         Text(
             text = "Org-WriteNotes Companion",
-            color = Color(0xFFF8FAFC),
+            color = if (isEInk) Color.Black else Color(0xFFF8FAFC),
             fontSize = 22.sp,
             fontWeight = FontWeight.Bold
         )
         Spacer(modifier = Modifier.height(8.dp))
         Text(
             text = "Run M-x org-writenotes-connect-adb in Emacs or select an Org heading from the sidebar.",
-            color = Color(0xFF94A3B8),
+            color = if (isEInk) Color(0xFF334155) else Color(0xFF94A3B8),
             fontSize = 14.sp
         )
         Spacer(modifier = Modifier.height(16.dp))
@@ -3284,31 +3412,34 @@ private fun PairingModalDialog(
     onConnectAdb: (Int) -> Unit,
     onConnectNetwork: (String, String?) -> Unit
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     var wsUrlOrQr by remember { mutableStateOf("ws://192.168.1.42:9876") }
     var token by remember { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Pair with Running Emacs Instance") },
+        title = { Text("Pair with Running Emacs Instance", color = if (isEInk) Color.Black else Color.White) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (!errorMessage.isNullOrBlank()) {
                     Text(
                         text = "⚠ $errorMessage",
-                        color = Color(0xFFEF4444),
+                        color = if (isEInk) Color.Black else Color(0xFFEF4444),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(6.dp))
-                            .background(Color(0x33EF4444))
+                            .background(if (isEInk) Color(0xFFF1F5F9) else Color(0x33EF4444))
+                            .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(6.dp)) else Modifier)
                             .padding(8.dp)
                     )
                 }
 
                 Text(
                     text = "Option 1: USB Debugging (ADB Reverse Tunnel)",
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (isEInk) Color.Black else Color(0xFFF8FAFC)
                 )
                 Button(
                     onClick = { onConnectAdb(9876) },
@@ -3321,7 +3452,8 @@ private fun PairingModalDialog(
 
                 Text(
                     text = "Option 2: LAN / Tailscale / QR Payload (M-x org-writenotes-pair-qr)",
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (isEInk) Color.Black else Color(0xFFF8FAFC)
                 )
                 OutlinedTextField(
                     value = wsUrlOrQr,
@@ -3365,15 +3497,16 @@ private fun PairingModalDialog(
                             .fillMaxWidth()
                             .height(140.dp)
                             .clip(RoundedCornerShape(6.dp))
-                            .background(Color(0xFF0F172A))
+                            .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF0F172A))
+                            .then(if (isEInk) Modifier.border(1.dp, Color.Black, RoundedCornerShape(6.dp)) else Modifier)
                             .verticalScroll(rememberScrollState())
                             .padding(8.dp)
                     ) {
                         if (logs.isEmpty()) {
-                            Text("No internal logs recorded yet.", color = Color.Gray, fontSize = 11.sp)
+                            Text("No internal logs recorded yet.", color = if (isEInk) Color.Black else Color.Gray, fontSize = 11.sp)
                         } else {
                             logs.takeLast(40).forEach { item ->
-                                val color = when (item.level) {
+                                val color = if (isEInk) Color.Black else when (item.level) {
                                     "E" -> Color(0xFFEF4444)
                                     "W" -> Color(0xFFF59E0B)
                                     else -> Color(0xFF94A3B8)
@@ -3391,9 +3524,10 @@ private fun PairingModalDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = { onDismiss() }) {
                 Text("Cancel")
             }
-        }
+        },
+        containerColor = if (isEInk) Color.White else Color(0xFF1E293B)
     )
 }

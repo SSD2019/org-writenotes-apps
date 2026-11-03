@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.orgwritenotes.ink.OnyxEInkBridge
 import com.orgwritenotes.ink.StylusToolMode
 import com.orgwritenotes.ink.WriteCanvasBlockView
 import com.orgwritenotes.ink.WriteNativeBridge
@@ -196,7 +197,7 @@ enum class WriteIconAsset(
 @Composable
 fun WriteSvgIcon(
     asset: WriteIconAsset,
-    tint: Color = Color(0xFFF1F5F9),
+    tint: Color = if (OnyxEInkBridge.isEInkDevice) Color.Black else Color(0xFFF1F5F9),
     size: Dp = 20.dp,
     contentDescription: String? = null
 ) {
@@ -338,23 +339,46 @@ private object WritePenPresetStorage {
 // Exact width progression from Stylus Labs Write `PenToolbar::PEN_WIDTHS`
 private val WRITE_PEN_WIDTH_PALETTE = listOf(1.0f, 1.6f, 2.4f, 3.2f, 4.5f, 6.5f, 12.0f)
 
-private val WRITE_COLOR_PALETTE = listOf(
-    0xFF1E293B.toInt(), // Slate / Black
-    0xFF1D4ED8.toInt(), // Write Blue
-    0xFFDC2626.toInt(), // Write Red
-    0xFF15803D.toInt(), // Write Green
-    0xFFD97706.toInt(), // Amber / Orange
-    0xFF7E22CE.toInt(), // Purple
-    0xFF0E7490.toInt(), // Cyan / Teal
-    0xFF64748B.toInt(), // Gray
-    0xFFFFFFFF.toInt()  // White
-)
+private val WRITE_COLOR_PALETTE = if (OnyxEInkBridge.isEInkDevice) {
+    listOf(
+        0xFF000000.toInt(), // Pure Black (primary E-Ink ink)
+        0xFF334155.toInt(), // Dark Slate
+        0xFF64748B.toInt(), // Medium Gray
+        0xFF1D4ED8.toInt(), // Write Blue (for Kaleido color E-Ink & SVG export)
+        0xFFDC2626.toInt(), // Write Red
+        0xFF15803D.toInt(), // Write Green
+        0xFFD97706.toInt(), // Amber / Orange
+        0xFF7E22CE.toInt()  // Purple
+    )
+} else {
+    listOf(
+        0xFF1E293B.toInt(), // Slate / Black
+        0xFF1D4ED8.toInt(), // Write Blue
+        0xFFDC2626.toInt(), // Write Red
+        0xFF15803D.toInt(), // Write Green
+        0xFFD97706.toInt(), // Amber / Orange
+        0xFF7E22CE.toInt(), // Purple
+        0xFF0E7490.toInt(), // Cyan / Teal
+        0xFF64748B.toInt(), // Gray
+        0xFFFFFFFF.toInt()  // White
+    )
+}
 
 private val WRITE_SAVED_PENS = listOf(
-    SavedWritePenPreset("Fine Black", 0xFF1E293B.toInt(), 1.8f, WritePenTip.ROUND),
+    SavedWritePenPreset(
+        "Fine Black",
+        if (OnyxEInkBridge.isEInkDevice) 0xFF000000.toInt() else 0xFF1E293B.toInt(),
+        1.8f,
+        WritePenTip.ROUND
+    ),
     SavedWritePenPreset("Ballpoint Blue", 0xFF1D4ED8.toInt(), 2.6f, WritePenTip.ROUND),
     SavedWritePenPreset("Markup Red", 0xFFDC2626.toInt(), 2.6f, WritePenTip.ROUND),
-    SavedWritePenPreset("Chisel Fountain", 0xFF1E293B.toInt(), 4.2f, WritePenTip.CHISEL),
+    SavedWritePenPreset(
+        "Chisel Fountain",
+        if (OnyxEInkBridge.isEInkDevice) 0xFF000000.toInt() else 0xFF1E293B.toInt(),
+        4.2f,
+        WritePenTip.CHISEL
+    ),
     SavedWritePenPreset("Highlighter", 0xFFFACC15.toInt(), 4.5f, WritePenTip.FLAT, isHighlighter = true)
 )
 
@@ -421,6 +445,18 @@ fun WriteSharedToolbarChrome(
     onUserInteracted: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    val isEInk = OnyxEInkBridge.isEInkDevice
+    val barBg = if (isEInk) Color.White else Color(0xFF222222)
+    val penBarBg = if (isEInk) Color(0xFFF8FAFC) else Color(0xFF323232)
+    val chipBg = if (isEInk) Color.White else Color(0xFF1F2937)
+    val chipActiveBg = if (isEInk) Color.Black else Color(0xFF0284C7)
+    val chipBorder = if (isEInk) Color.Black else Color(0xFF4B5563)
+    val chipActiveBorder = if (isEInk) Color.Black else Color(0xFF38BDF8)
+    val textPrimary = if (isEInk) Color.Black else Color.White
+    val textSecondary = if (isEInk) Color.Black else Color(0xFFCBD5E1)
+    val textMuted = if (isEInk) Color(0xFF334155) else Color(0xFF94A3B8)
+    val accentColor = if (isEInk) Color.Black else Color(0xFF38BDF8)
+
     var showEraseMenu by remember { mutableStateOf(false) }
     var showSelectMenu by remember { mutableStateOf(false) }
     var showInsertSpaceMenu by remember { mutableStateOf(false) }
@@ -432,20 +468,20 @@ fun WriteSharedToolbarChrome(
             .clip(if (isZoomedFullScreen) RoundedCornerShape(0.dp) else RoundedCornerShape(10.dp))
             .border(
                 width = if (isZoomedFullScreen) 0.dp else 1.dp,
-                color = if (isZoomedFullScreen) Color.Transparent else Color(0xFF38BDF8),
+                color = if (isZoomedFullScreen) Color.Transparent else accentColor,
                 shape = if (isZoomedFullScreen) RoundedCornerShape(0.dp) else RoundedCornerShape(10.dp)
             )
-            .background(Color(0xFF222222))
+            .background(barBg)
     ) {
         // ====================================================================
-        // 1. Stylus Labs Write Main Toolbar (`#222222`)
+        // 1. Stylus Labs Write Main Toolbar
         // ====================================================================
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF222222))
+                .background(barBg)
                 .horizontalScroll(rememberScrollState())
                 .padding(horizontal = 10.dp, vertical = 6.dp)
         ) {
@@ -454,17 +490,18 @@ fun WriteSharedToolbarChrome(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .background(Color(0xFF334155))
+                        .background(if (isEInk) Color.White else Color(0xFF334155))
+                        .border(1.dp, if (isEInk) Color.Black else Color.Transparent, RoundedCornerShape(6.dp))
                         .clickable { onZoomOrCloseFullScreen() }
                         .padding(horizontal = if (showLabels) 10.dp else 8.dp, vertical = 6.dp)
                         .semantics(mergeDescendants = true) { contentDescription = "Done" }
                 ) {
-                    WriteSvgIcon(asset = WriteIconAsset.BACK, tint = Color.White, size = 18.dp)
+                    WriteSvgIcon(asset = WriteIconAsset.BACK, tint = textPrimary, size = 18.dp)
                     if (showLabels) {
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = "Done",
-                            color = Color.White,
+                            color = textPrimary,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold
                         )
@@ -477,13 +514,13 @@ fun WriteSharedToolbarChrome(
             Column(modifier = Modifier.padding(end = 6.dp)) {
                 Text(
                     text = "Canvas • ${WriteTemplateStyle.fromNativeCode(pageSetup.rulingStyle).label}",
-                    color = Color(0xFF38BDF8),
+                    color = accentColor,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
                     text = "${pageSetup.width}×${pageSetup.height} • ${pageSetup.strokeCount} strokes",
-                    color = Color(0xFF94A3B8),
+                    color = textMuted,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 10.sp
                 )
@@ -882,15 +919,29 @@ fun WriteSharedToolbarChrome(
             val isLaserActive = activeMode == StylusToolMode.LASER
             Text(
                 text = "🔴 Laser",
-                color = if (isLaserActive) Color.White else Color(0xFFFCA5A5),
+                color = when {
+                    isEInk -> if (isLaserActive) Color.White else Color.Black
+                    isLaserActive -> Color.White
+                    else -> Color(0xFFFCA5A5)
+                },
                 fontSize = 11.sp,
                 fontWeight = if (isLaserActive) FontWeight.Bold else FontWeight.SemiBold,
                 modifier = Modifier
                     .clip(RoundedCornerShape(6.dp))
-                    .background(if (isLaserActive) Color(0xFFDC2626) else Color(0xFF2E2E2E))
+                    .background(
+                        when {
+                            isEInk -> if (isLaserActive) Color.Black else Color.White
+                            isLaserActive -> Color(0xFFDC2626)
+                            else -> Color(0xFF2E2E2E)
+                        }
+                    )
                     .border(
                         1.dp,
-                        if (isLaserActive) Color(0xFFF87171) else Color(0xFF3F3F46),
+                        when {
+                            isEInk -> Color.Black
+                            isLaserActive -> Color(0xFFF87171)
+                            else -> Color(0xFF3F3F46)
+                        },
                         RoundedCornerShape(6.dp)
                     )
                     .clickable {
@@ -934,13 +985,13 @@ fun WriteSharedToolbarChrome(
             if (onTrimWhitespace != null) {
                 Text(
                     text = "✂ Trim Fit",
-                    color = Color(0xFFE2E8F0),
+                    color = if (isEInk) Color.Black else Color(0xFFE2E8F0),
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .background(Color(0xFF2E2E2E))
-                        .border(1.dp, Color(0xFF3F3F46), RoundedCornerShape(6.dp))
+                        .background(if (isEInk) Color.White else Color(0xFF2E2E2E))
+                        .border(1.dp, if (isEInk) Color.Black else Color(0xFF3F3F46), RoundedCornerShape(6.dp))
                         .clickable {
                             onUserInteracted()
                             onTrimWhitespace()
@@ -974,7 +1025,8 @@ fun WriteSharedToolbarChrome(
                 )
             }
 
-            if (onToggleDarkCanvasTheme != null) {
+            // On E-Ink devices, dark/light theme option is intentionally hidden: E-Ink is always black on light background.
+            if (!isEInk && onToggleDarkCanvasTheme != null) {
                 Text(
                     text = if (isDarkCanvasTheme) "☾ Dark" else "☀ Light",
                     color = if (isDarkCanvasTheme) Color(0xFF38BDF8) else Color(0xFFFDE047),
@@ -1002,7 +1054,7 @@ fun WriteSharedToolbarChrome(
                     icon = WriteIconAsset.DELETE,
                     label = "Delete",
                     selected = false,
-                    tint = Color(0xFFEF4444),
+                    tint = if (isEInk) Color.Black else Color(0xFFEF4444),
                     showLabel = showLabels,
                     onClick = {
                         onUserInteracted()
@@ -1015,7 +1067,7 @@ fun WriteSharedToolbarChrome(
                     icon = WriteIconAsset.DELETE,
                     label = "Canvas",
                     selected = false,
-                    tint = Color(0xFF94A3B8),
+                    tint = textMuted,
                     showLabel = showLabels,
                     onClick = {
                         onUserInteracted()
@@ -1051,7 +1103,7 @@ fun WriteSharedToolbarChrome(
                 if (onAutoHideDismiss != null) {
                     Text(
                         text = "✕",
-                        color = Color(0xFF94A3B8),
+                        color = textMuted,
                         fontSize = 14.sp,
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
@@ -1063,19 +1115,20 @@ fun WriteSharedToolbarChrome(
         }
 
         // ====================================================================
-        // 2. Stylus Labs Write Second-Row `PenToolbar` (`#323232` graybar)
+        // 2. Stylus Labs Write Second-Row `PenToolbar`
         // ====================================================================
-        AnimatedVisibility(
-            visible = showPenToolbar,
-            enter = expandVertically() + fadeIn(),
-            exit = shrinkVertically() + fadeOut()
-        ) {
+        if (isEInk) {
+            if (showPenToolbar) {
+                HorizontalDivider(color = Color.Black, thickness = 1.dp)
+            }
+        }
+        val penToolbarContent: @Composable () -> Unit = {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Color(0xFF323232))
+                    .background(penBarBg)
                     .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 12.dp, vertical = 6.dp)
             ) {
@@ -1093,10 +1146,10 @@ fun WriteSharedToolbarChrome(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .background(if (isPresetActive) Color(0xFF0284C7) else Color(0xFF1F2937))
+                            .background(if (isPresetActive) chipActiveBg else chipBg)
                             .border(
                                 1.dp,
-                                if (isPresetActive) Color(0xFF38BDF8) else Color(0xFF4B5563),
+                                if (isPresetActive) chipActiveBorder else chipBorder,
                                 RoundedCornerShape(6.dp)
                             )
                             .clickable {
@@ -1113,8 +1166,10 @@ fun WriteSharedToolbarChrome(
                             }
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     ) {
-                        val displayDotColor = if (isDarkCanvasTheme && !preset.isHighlighter && preset.colorArgb == 0xFF1E293B.toInt()) {
+                        val displayDotColor = if (!isEInk && isDarkCanvasTheme && !preset.isHighlighter && preset.colorArgb == 0xFF1E293B.toInt()) {
                             Color(0xFFF8FAFC)
+                        } else if (isEInk && isPresetActive && !preset.isHighlighter) {
+                            Color.White
                         } else {
                             Color(preset.colorArgb)
                         }
@@ -1123,11 +1178,12 @@ fun WriteSharedToolbarChrome(
                                 .size(10.dp)
                                 .clip(CircleShape)
                                 .background(displayDotColor)
+                                .border(0.5.dp, if (isEInk) Color.Black else Color.Transparent, CircleShape)
                         )
                         Spacer(modifier = Modifier.width(5.dp))
                         Text(
                             text = preset.name,
-                            color = Color.White,
+                            color = if (isPresetActive) Color.White else textPrimary,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Medium
                         )
@@ -1135,7 +1191,7 @@ fun WriteSharedToolbarChrome(
                             Spacer(modifier = Modifier.width(5.dp))
                             Text(
                                 text = "×",
-                                color = Color(0xFF94A3B8),
+                                color = if (isPresetActive) Color.White else textMuted,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier.clickable {
@@ -1153,13 +1209,13 @@ fun WriteSharedToolbarChrome(
                 // + Save Current Pen Preset
                 Text(
                     text = "+ Save Pen",
-                    color = Color(0xFF38BDF8),
+                    color = accentColor,
                     fontSize = 10.sp,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier
                         .clip(RoundedCornerShape(4.dp))
-                        .background(Color(0xFF1F2937))
-                        .border(1.dp, Color(0xFF38BDF8).copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+                        .background(chipBg)
+                        .border(1.dp, if (isEInk) Color.Black else accentColor.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
                         .clickable {
                             onUserInteracted()
                             val newName = "Pen ${customPens.size + 1} (${selectedWidth}px)"
@@ -1185,7 +1241,7 @@ fun WriteSharedToolbarChrome(
                 ) {
                     WRITE_COLOR_PALETTE.forEach { argb ->
                         val isSelected = selectedColor == argb
-                        val swatchColor = if (isDarkCanvasTheme && argb == 0xFF1E293B.toInt()) {
+                        val swatchColor = if (!isEInk && isDarkCanvasTheme && argb == 0xFF1E293B.toInt()) {
                             Color(0xFFF8FAFC)
                         } else {
                             Color(argb)
@@ -1196,8 +1252,8 @@ fun WriteSharedToolbarChrome(
                                 .clip(RoundedCornerShape(4.dp))
                                 .background(swatchColor)
                                 .border(
-                                    width = if (isSelected) 2.dp else 1.dp,
-                                    color = if (isSelected) Color(0xFF38BDF8) else Color(0xFF64748B),
+                                    width = if (isSelected) 2.5.dp else 1.dp,
+                                    color = if (isSelected) accentColor else Color(0xFF64748B),
                                     shape = RoundedCornerShape(4.dp)
                                 )
                                 .clickable {
@@ -1265,12 +1321,13 @@ fun WriteSharedToolbarChrome(
                     val isTipActive = activeMode == StylusToolMode.PEN && selectedPenTip == tip
                     Text(
                         text = tip.label,
-                        color = if (isTipActive) Color.White else Color(0xFFCBD5E1),
+                        color = if (isTipActive) Color.White else textSecondary,
                         fontSize = 11.sp,
                         fontWeight = if (isTipActive) FontWeight.Bold else FontWeight.Normal,
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
-                            .background(if (isTipActive) Color(0xFF0284C7) else Color(0xFF1F2937))
+                            .background(if (isTipActive) chipActiveBg else chipBg)
+                            .border(1.dp, if (isEInk) Color.Black else Color.Transparent, RoundedCornerShape(4.dp))
                             .clickable {
                                 onUserInteracted()
                                 onSelectToolMode(
@@ -1290,12 +1347,23 @@ fun WriteSharedToolbarChrome(
                 val isHighlight = activeMode == StylusToolMode.HIGHLIGHTER
                 Text(
                     text = "Highlighter",
-                    color = if (isHighlight) Color(0xFF0F172A) else Color(0xFFFDE047),
+                    color = when {
+                        isEInk -> if (isHighlight) Color.White else Color.Black
+                        isHighlight -> Color(0xFF0F172A)
+                        else -> Color(0xFFFDE047)
+                    },
                     fontSize = 11.sp,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier
                         .clip(RoundedCornerShape(4.dp))
-                        .background(if (isHighlight) Color(0xFFFACC15) else Color(0xFF1F2937))
+                        .background(
+                            when {
+                                isEInk -> if (isHighlight) Color.Black else Color.White
+                                isHighlight -> Color(0xFFFACC15)
+                                else -> Color(0xFF1F2937)
+                            }
+                        )
+                        .border(1.dp, if (isEInk) Color.Black else Color.Transparent, RoundedCornerShape(4.dp))
                         .clickable {
                             onUserInteracted()
                             onSelectToolMode(
@@ -1316,15 +1384,29 @@ fun WriteSharedToolbarChrome(
                     WriteToolbarDivider()
                     Text(
                         text = if (pressureEnabled) "Pressure: ON" else "Pressure: OFF",
-                        color = if (pressureEnabled) Color(0xFF38BDF8) else Color(0xFF94A3B8),
+                        color = when {
+                            isEInk -> if (pressureEnabled) Color.White else Color.Black
+                            pressureEnabled -> Color(0xFF38BDF8)
+                            else -> Color(0xFF94A3B8)
+                        },
                         fontSize = 11.sp,
                         fontWeight = if (pressureEnabled) FontWeight.SemiBold else FontWeight.Normal,
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
-                            .background(if (pressureEnabled) Color(0x330284C7) else Color(0xFF1F2937))
+                            .background(
+                                when {
+                                    isEInk -> if (pressureEnabled) Color.Black else Color.White
+                                    pressureEnabled -> Color(0x330284C7)
+                                    else -> Color(0xFF1F2937)
+                                }
+                            )
                             .border(
                                 1.dp,
-                                if (pressureEnabled) Color(0xFF0284C7) else Color(0xFF4B5563),
+                                when {
+                                    isEInk -> Color.Black
+                                    pressureEnabled -> Color(0xFF0284C7)
+                                    else -> Color(0xFF4B5563)
+                                },
                                 RoundedCornerShape(4.dp)
                             )
                             .clickable {
@@ -1340,7 +1422,7 @@ fun WriteSharedToolbarChrome(
                     WriteToolbarDivider()
                     Text(
                         text = "Nib Angle:",
-                        color = Color(0xFF94A3B8),
+                        color = textMuted,
                         fontSize = 11.sp,
                         modifier = Modifier.padding(end = 2.dp)
                     )
@@ -1348,12 +1430,13 @@ fun WriteSharedToolbarChrome(
                         val isAngActive = kotlin.math.abs(chiselAngle - ang) < 2f
                         Text(
                             text = "${ang.toInt()}°",
-                            color = if (isAngActive) Color.White else Color(0xFFCBD5E1),
+                            color = if (isAngActive) Color.White else textSecondary,
                             fontSize = 11.sp,
                             fontWeight = if (isAngActive) FontWeight.Bold else FontWeight.Normal,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(4.dp))
-                                .background(if (isAngActive) Color(0xFF0284C7) else Color(0xFF1F2937))
+                                .background(if (isAngActive) chipActiveBg else chipBg)
+                                .border(1.dp, if (isEInk) Color.Black else Color.Transparent, RoundedCornerShape(4.dp))
                                 .clickable {
                                     onUserInteracted()
                                     onChangeChiselAngle(ang)
@@ -1371,15 +1454,15 @@ fun WriteSharedToolbarChrome(
                 if (onToggleLineDrawing != null) {
                     Text(
                         text = "╱ Line",
-                        color = if (lineDrawing) Color.White else Color(0xFFCBD5E1),
+                        color = if (lineDrawing) Color.White else textSecondary,
                         fontSize = 11.sp,
                         fontWeight = if (lineDrawing) FontWeight.Bold else FontWeight.Normal,
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
-                            .background(if (lineDrawing) Color(0xFF0284C7) else Color(0xFF1F2937))
+                            .background(if (lineDrawing) chipActiveBg else chipBg)
                             .border(
                                 1.dp,
-                                if (lineDrawing) Color(0xFF38BDF8) else Color(0xFF4B5563),
+                                if (lineDrawing) chipActiveBorder else chipBorder,
                                 RoundedCornerShape(4.dp)
                             )
                             .clickable {
@@ -1394,15 +1477,15 @@ fun WriteSharedToolbarChrome(
                 if (onToggleSnapToGrid != null) {
                     Text(
                         text = "⊞ Snap Grid",
-                        color = if (snapToGrid) Color.White else Color(0xFFCBD5E1),
+                        color = if (snapToGrid) Color.White else textSecondary,
                         fontSize = 11.sp,
                         fontWeight = if (snapToGrid) FontWeight.Bold else FontWeight.Normal,
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
-                            .background(if (snapToGrid) Color(0xFF0284C7) else Color(0xFF1F2937))
+                            .background(if (snapToGrid) chipActiveBg else chipBg)
                             .border(
                                 1.dp,
-                                if (snapToGrid) Color(0xFF38BDF8) else Color(0xFF4B5563),
+                                if (snapToGrid) chipActiveBorder else chipBorder,
                                 RoundedCornerShape(4.dp)
                             )
                             .clickable {
@@ -1412,6 +1495,20 @@ fun WriteSharedToolbarChrome(
                             .padding(horizontal = 7.dp, vertical = 4.dp)
                     )
                 }
+            }
+        }
+        if (isEInk) {
+            if (showPenToolbar) {
+                penToolbarContent()
+                HorizontalDivider(color = Color.Black, thickness = 1.dp)
+            }
+        } else {
+            AnimatedVisibility(
+                visible = showPenToolbar,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                penToolbarContent()
             }
         }
     }
@@ -1440,19 +1537,24 @@ fun WriteSelectionPopupBar(
     onClearSelection: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
+    val barBg = if (isEInk) Color.White else Color(0xEE1E293B)
+    val barBorder = if (isEInk) Color.Black else Color(0xFF38BDF8)
+    val pillBg = if (isEInk) Color.White else Color(0xFF334155)
+    val pillText = if (isEInk) Color.Black else Color.White
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         modifier = modifier
             .clip(RoundedCornerShape(10.dp))
-            .background(Color(0xEE1E293B))
-            .border(1.dp, Color(0xFF38BDF8), RoundedCornerShape(10.dp))
+            .background(barBg)
+            .border(if (isEInk) 1.5.dp else 1.dp, barBorder, RoundedCornerShape(10.dp))
             .horizontalScroll(rememberScrollState())
             .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
         Text(
             text = "$selectionCount selected (Drag box to move, corners to scale, top handle to rotate)",
-            color = Color(0xFF38BDF8),
+            color = if (isEInk) Color.Black else Color(0xFF38BDF8),
             fontSize = 11.sp,
             fontWeight = FontWeight.SemiBold
         )
@@ -1462,13 +1564,13 @@ fun WriteSelectionPopupBar(
         if (onConvertToText != null) {
             Text(
                 text = "✨ Convert to Text",
-                color = Color(0xFFFDE047),
+                color = if (isEInk) Color.White else Color(0xFFFDE047),
                 fontSize = 11.sp,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier
                     .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0xFF1E3A8A))
-                    .border(1.dp, Color(0xFF38BDF8), RoundedCornerShape(6.dp))
+                    .background(if (isEInk) Color.Black else Color(0xFF1E3A8A))
+                    .border(1.dp, barBorder, RoundedCornerShape(6.dp))
                     .clickable { onConvertToText() }
                     .padding(horizontal = 8.dp, vertical = 5.dp)
             )
@@ -1488,13 +1590,14 @@ fun WriteSelectionPopupBar(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .clip(RoundedCornerShape(6.dp))
-                .background(Color(0xFF334155))
+                .background(pillBg)
+                .border(1.dp, if (isEInk) Color.Black else Color.Transparent, RoundedCornerShape(6.dp))
                 .clickable { onDuplicate() }
                 .padding(horizontal = 8.dp, vertical = 5.dp)
         ) {
-            WriteSvgIcon(asset = WriteIconAsset.DUPLICATE, size = 14.dp)
+            WriteSvgIcon(asset = WriteIconAsset.DUPLICATE, tint = pillText, size = 14.dp)
             Spacer(modifier = Modifier.width(4.dp))
-            Text("Duplicate", color = Color.White, fontSize = 11.sp)
+            Text("Duplicate", color = pillText, fontSize = 11.sp)
         }
 
         if (onScaleSmaller != null && onScaleLarger != null) {
@@ -1511,7 +1614,8 @@ fun WriteSelectionPopupBar(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .clip(RoundedCornerShape(6.dp))
-                .background(Color(0xFF334155))
+                .background(pillBg)
+                .border(1.dp, if (isEInk) Color.Black else Color.Transparent, RoundedCornerShape(6.dp))
                 .clickable { onApplyStyle() }
                 .padding(horizontal = 8.dp, vertical = 5.dp)
         ) {
@@ -1522,25 +1626,26 @@ fun WriteSelectionPopupBar(
                     .background(Color(selectedColor))
             )
             Spacer(modifier = Modifier.width(5.dp))
-            Text("Apply Pen Style", color = Color.White, fontSize = 11.sp)
+            Text("Apply Pen Style", color = pillText, fontSize = 11.sp)
         }
 
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .clip(RoundedCornerShape(6.dp))
-                .background(Color(0xFF7F1D1D))
+                .background(if (isEInk) Color.White else Color(0xFF7F1D1D))
+                .border(1.dp, if (isEInk) Color.Black else Color.Transparent, RoundedCornerShape(6.dp))
                 .clickable { onDelete() }
                 .padding(horizontal = 8.dp, vertical = 5.dp)
         ) {
-            WriteSvgIcon(asset = WriteIconAsset.DELETE, size = 14.dp)
+            WriteSvgIcon(asset = WriteIconAsset.DELETE, tint = if (isEInk) Color.Black else Color(0xFFF1F5F9), size = 14.dp)
             Spacer(modifier = Modifier.width(4.dp))
-            Text("Delete", color = Color(0xFFFECACA), fontSize = 11.sp)
+            Text("Delete", color = if (isEInk) Color.Black else Color(0xFFFECACA), fontSize = 11.sp)
         }
 
         Text(
             text = "✕",
-            color = Color(0xFF94A3B8),
+            color = if (isEInk) Color.Black else Color(0xFF94A3B8),
             fontSize = 14.sp,
             modifier = Modifier
                 .clip(RoundedCornerShape(4.dp))
@@ -1555,14 +1660,16 @@ private fun SelectionActionPill(
     label: String,
     onClick: () -> Unit
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     Text(
         text = label,
-        color = Color.White,
+        color = if (isEInk) Color.Black else Color.White,
         fontSize = 11.sp,
         fontWeight = FontWeight.Medium,
         modifier = Modifier
             .clip(RoundedCornerShape(6.dp))
-            .background(Color(0xFF334155))
+            .background(if (isEInk) Color.White else Color(0xFF334155))
+            .border(1.dp, if (isEInk) Color.Black else Color.Transparent, RoundedCornerShape(6.dp))
             .clickable { onClick() }
             .padding(horizontal = 8.dp, vertical = 5.dp)
     )
@@ -1579,12 +1686,14 @@ fun WriteZoomedEditorOverlay(
     sourceInlineView: WriteCanvasBlockView? = null,
     onCloseZoom: (updatedWidth: Int, updatedHeight: Int) -> Unit
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     var canvasViewRef by remember(block.blockId) { mutableStateOf<WriteCanvasBlockView?>(null) }
     val emacsTheme by syncClient.emacsTheme.collectAsState()
+    val effectiveDark = if (isEInk) false else emacsTheme.isDark
     val bgArgb = remember(emacsTheme) { emacsTheme.resolvedDarkBgArgb() }
     val fgArgb = remember(emacsTheme) { emacsTheme.resolvedDarkFgArgb() }
-    LaunchedEffect(emacsTheme, canvasViewRef) {
-        canvasViewRef?.setAdaptiveTheme(emacsTheme.isDark, bgArgb, fgArgb)
+    LaunchedEffect(effectiveDark, bgArgb, fgArgb, canvasViewRef) {
+        canvasViewRef?.setAdaptiveTheme(effectiveDark, bgArgb, fgArgb)
     }
 
     var activeMode by remember(block.blockId) { mutableStateOf(StylusToolMode.PEN) }
@@ -1593,7 +1702,9 @@ fun WriteZoomedEditorOverlay(
     var lastInsertSpaceMode by remember(block.blockId) { mutableStateOf(StylusToolMode.INSERT_SPACE_RULED) }
 
     var showPenToolbar by remember(block.blockId) { mutableStateOf(true) }
-    var selectedColor by remember(block.blockId) { mutableStateOf(0xFF1E293B.toInt()) }
+    var selectedColor by remember(block.blockId) {
+        mutableStateOf(if (isEInk) 0xFF000000.toInt() else 0xFF1E293B.toInt())
+    }
     var selectedWidth by remember(block.blockId) { mutableStateOf(2.6f) }
     var selectedPenTip by remember(block.blockId) { mutableStateOf(WritePenTip.ROUND) }
     var chiselAngle by remember(block.blockId) { mutableStateOf(45f) }
@@ -1654,7 +1765,7 @@ fun WriteZoomedEditorOverlay(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF18181B))
+            .background(if (isEInk) Color(0xFFF1F5F9) else Color(0xFF18181B))
     ) {
         WriteSharedToolbarChrome(
             activeFileName = block.fileName,
@@ -1768,8 +1879,8 @@ fun WriteZoomedEditorOverlay(
             onTrimWhitespace = { canvasViewRef?.trimWhitespace() },
             onOpenPageSetup = { showPageSetupDialog = true },
             onDeleteImage = { showDeleteConfirmDialog = true },
-            isDarkCanvasTheme = emacsTheme.isDark,
-            onToggleDarkCanvasTheme = { syncClient.toggleCanvasDarkMode() }
+            isDarkCanvasTheme = effectiveDark,
+            onToggleDarkCanvasTheme = if (isEInk) null else ({ syncClient.toggleCanvasDarkMode() })
         )
 
         Box(
@@ -1827,7 +1938,7 @@ fun WriteZoomedEditorOverlay(
                         }
                     ).apply {
                         singleTouchPanInZoomedMode = singleTouchPan
-                        setAdaptiveTheme(emacsTheme.isDark, bgArgb, fgArgb)
+                        setAdaptiveTheme(effectiveDark, bgArgb, fgArgb)
                         if (sourceInlineView == null) {
                             loadFromBase64Svgz(block.svgzBase64)
                         } else {
@@ -1855,7 +1966,7 @@ fun WriteZoomedEditorOverlay(
                     }
                 },
                 update = { view ->
-                    view.setAdaptiveTheme(emacsTheme.isDark, bgArgb, fgArgb)
+                    view.setAdaptiveTheme(effectiveDark, bgArgb, fgArgb)
                 },
                 modifier = Modifier.fillMaxSize()
             )
@@ -1920,14 +2031,18 @@ fun WriteZoomedEditorOverlay(
                     .align(Alignment.BottomStart)
                     .padding(12.dp)
                     .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0xD9222222))
-                    .border(1.dp, Color(0xFF3F3F46), RoundedCornerShape(8.dp))
+                    .background(if (isEInk) Color.White else Color(0xD9222222))
+                    .border(1.dp, if (isEInk) Color.Black else Color(0xFF3F3F46), RoundedCornerShape(8.dp))
                     .padding(horizontal = 10.dp, vertical = 6.dp)
             ) {
-                WriteSvgIcon(asset = WriteIconAsset.ZOOM, tint = Color(0xFF94A3B8), size = 16.dp)
+                WriteSvgIcon(
+                    asset = WriteIconAsset.ZOOM,
+                    tint = if (isEInk) Color.Black else Color(0xFF94A3B8),
+                    size = 16.dp
+                )
                 Text(
                     text = "${(zoomScale * 100).roundToInt()}%",
-                    color = Color(0xFFF8FAFC),
+                    color = if (isEInk) Color.Black else Color(0xFFF8FAFC),
                     fontFamily = FontFamily.Monospace,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold
@@ -1937,6 +2052,12 @@ fun WriteZoomedEditorOverlay(
                 StatusbarMiniPill(label = "Fit Width") { canvasViewRef?.zoomFitWidth() }
                 StatusbarMiniPill(label = "Fit Page") { canvasViewRef?.zoomFitPage() }
                 StatusbarMiniPill(label = "+") { canvasViewRef?.zoomBy(1.25f) }
+
+                if (isEInk) {
+                    WriteToolbarDivider()
+                    StatusbarMiniPill(label = "PgUp") { canvasViewRef?.pageScrollVertical(-1) }
+                    StatusbarMiniPill(label = "PgDn") { canvasViewRef?.pageScrollVertical(1) }
+                }
 
                 WriteToolbarDivider()
 
@@ -1966,8 +2087,8 @@ fun WriteZoomedEditorOverlay(
                         .padding(12.dp)
                         .size(width = 110.dp, height = 75.dp)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xCC0F172A))
-                        .border(1.dp, Color(0xFF38BDF8), RoundedCornerShape(8.dp))
+                        .background(if (isEInk) Color.White else Color(0xCC0F172A))
+                        .border(1.dp, if (isEInk) Color.Black else Color(0xFF38BDF8), RoundedCornerShape(8.dp))
                 ) {
                     val mapAspect = (pageSetup.width.toFloat() / pageSetup.height.coerceAtLeast(100).toFloat()).coerceIn(0.5f, 2.5f)
                     val vpLeftNorm = (-cv.panOffsetX / (pageSetup.width * cv.zoomScale)).coerceIn(0f, 1f)
@@ -1984,15 +2105,15 @@ fun WriteZoomedEditorOverlay(
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .border(0.5.dp, Color(0x6694A3B8), RoundedCornerShape(4.dp))
+                                .border(0.5.dp, if (isEInk) Color.Black else Color(0x6694A3B8), RoundedCornerShape(4.dp))
                         )
                         // Viewport window box in minimap
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth(vpWNorm)
                                 .fillMaxHeight(vpHNorm)
-                                .border(1.dp, Color(0xFF38BDF8), RoundedCornerShape(2.dp))
-                                .background(Color(0x3338BDF8))
+                                .border(1.dp, if (isEInk) Color.Black else Color(0xFF38BDF8), RoundedCornerShape(2.dp))
+                                .background(if (isEInk) Color.Transparent else Color(0x3338BDF8))
                         )
                     }
                 }
@@ -2045,7 +2166,7 @@ fun WriteZoomedEditorOverlay(
             title = {
                 Text(
                     text = "Handwriting OCR — Convert Selection to Org Text",
-                    color = Color(0xFFF1F5F9),
+                    color = if (isEInk) Color.Black else Color(0xFFF1F5F9),
                     fontWeight = FontWeight.Bold,
                     fontSize = 16.sp
                 )
@@ -2054,7 +2175,7 @@ fun WriteZoomedEditorOverlay(
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         text = "Review or edit the recognized text before inserting into your Org node:",
-                        color = Color(0xFF94A3B8),
+                        color = if (isEInk) Color(0xFF334155) else Color(0xFF94A3B8),
                         fontSize = 12.sp
                     )
                     OutlinedTextField(
@@ -2115,10 +2236,10 @@ fun WriteZoomedEditorOverlay(
             },
             dismissButton = {
                 TextButton(onClick = { showOcrDialog = false }) {
-                    Text("Cancel", color = Color(0xFF94A3B8))
+                    Text("Cancel", color = if (isEInk) Color.Black else Color(0xFF94A3B8))
                 }
             },
-            containerColor = Color(0xFF1E293B),
+            containerColor = if (isEInk) Color.White else Color(0xFF1E293B),
             shape = RoundedCornerShape(12.dp)
         )
     }
@@ -2129,14 +2250,14 @@ fun WriteZoomedEditorOverlay(
             title = {
                 Text(
                     text = "Delete Image?",
-                    color = Color(0xFFF1F5F9),
+                    color = if (isEInk) Color.Black else Color(0xFFF1F5F9),
                     fontWeight = FontWeight.Bold
                 )
             },
             text = {
                 Text(
                     text = "Are you sure you want to delete this canvas?\nThis will remove it from the Org note and delete the file from disk.",
-                    color = Color(0xFF94A3B8),
+                    color = if (isEInk) Color(0xFF334155) else Color(0xFF94A3B8),
                     fontSize = 14.sp
                 )
             },
@@ -2147,17 +2268,19 @@ fun WriteZoomedEditorOverlay(
                         syncClient.deleteInkBlock(nodeId, block.fileName, block.linkText)
                         onCloseZoom(pageSetup.width, pageSetup.height)
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626))
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isEInk) Color.Black else Color(0xFFDC2626)
+                    )
                 ) {
                     Text("Delete", color = Color.White, fontWeight = FontWeight.SemiBold)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirmDialog = false }) {
-                    Text("Cancel", color = Color(0xFF94A3B8))
+                    Text("Cancel", color = if (isEInk) Color.Black else Color(0xFF94A3B8))
                 }
             },
-            containerColor = Color(0xFF1E293B),
+            containerColor = if (isEInk) Color.White else Color(0xFF1E293B),
             shape = RoundedCornerShape(12.dp)
         )
     }
@@ -2173,16 +2296,22 @@ private fun WriteMainToolButton(
     showLabel: Boolean = false,
     onClick: () -> Unit
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     val bgColor = when {
-        !enabled -> Color.Transparent
-        selected -> Color(0xFF0284C7)
-        else -> Color(0xFF2E2E2E)
+        !enabled -> if (isEInk) Color(0xFFF1F5F9) else Color.Transparent
+        selected -> if (isEInk) Color.Black else Color(0xFF0284C7)
+        else -> if (isEInk) Color.White else Color(0xFF2E2E2E)
     }
     val contentTint = when {
-        !enabled -> Color(0xFF52525B)
+        !enabled -> if (isEInk) Color(0xFF94A3B8) else Color(0xFF52525B)
         selected -> Color.White
         tint != null -> tint
-        else -> Color(0xFFE2E8F0)
+        else -> if (isEInk) Color.Black else Color(0xFFE2E8F0)
+    }
+    val borderColor = when {
+        isEInk -> if (!enabled) Color(0xFF94A3B8) else Color.Black
+        selected -> Color(0xFF38BDF8)
+        else -> Color(0xFF3F3F46)
     }
     val hasDropdown = label.contains("▾")
     Row(
@@ -2192,7 +2321,7 @@ private fun WriteMainToolButton(
             .background(bgColor)
             .border(
                 width = 1.dp,
-                color = if (selected) Color(0xFF38BDF8) else Color(0xFF3F3F46),
+                color = borderColor,
                 shape = RoundedCornerShape(6.dp)
             )
             .clickable(enabled = enabled) { onClick() }
@@ -2231,14 +2360,28 @@ private fun WriteWidthPreviewButton(
     selected: Boolean,
     onClick: () -> Unit
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
+    val bgColor = when {
+        isEInk -> if (selected) Color.Black else Color.White
+        else -> if (selected) Color(0xFF0284C7) else Color(0xFF1F2937)
+    }
+    val fgColor = when {
+        isEInk -> if (selected) Color.White else Color.Black
+        else -> Color.White
+    }
+    val borderColor = when {
+        isEInk -> Color.Black
+        selected -> Color.White
+        else -> Color(0xFF4B5563)
+    }
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
             .clip(RoundedCornerShape(4.dp))
-            .background(if (selected) Color(0xFF0284C7) else Color(0xFF1F2937))
+            .background(bgColor)
             .border(
                 width = if (selected) 1.5.dp else 1.dp,
-                color = if (selected) Color.White else Color(0xFF4B5563),
+                color = borderColor,
                 shape = RoundedCornerShape(4.dp)
             )
             .clickable { onClick() }
@@ -2246,7 +2389,7 @@ private fun WriteWidthPreviewButton(
     ) {
         Canvas(modifier = Modifier.size(width = 20.dp, height = 12.dp)) {
             drawLine(
-                color = Color.White,
+                color = fgColor,
                 start = Offset(2f, size.height / 2f),
                 end = Offset(size.width - 2f, size.height / 2f),
                 strokeWidth = strokeWidthPx.coerceIn(1.5f, 10f),
@@ -2255,7 +2398,7 @@ private fun WriteWidthPreviewButton(
         }
         Text(
             text = strokeWidthPx.toString(),
-            color = Color(0xFFE2E8F0),
+            color = if (isEInk) fgColor else Color(0xFFE2E8F0),
             fontSize = 9.sp,
             fontFamily = FontFamily.Monospace
         )
@@ -2268,14 +2411,26 @@ private fun StatusbarMiniPill(
     highlighted: Boolean = false,
     onClick: () -> Unit
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     Text(
         text = label,
-        color = if (highlighted) Color(0xFF38BDF8) else Color(0xFFE2E8F0),
+        color = when {
+            isEInk -> if (highlighted) Color.White else Color.Black
+            highlighted -> Color(0xFF38BDF8)
+            else -> Color(0xFFE2E8F0)
+        },
         fontSize = 11.sp,
         fontWeight = FontWeight.Medium,
         modifier = Modifier
             .clip(RoundedCornerShape(4.dp))
-            .background(if (highlighted) Color(0xFF1E3A8A) else Color(0xFF333333))
+            .background(
+                when {
+                    isEInk -> if (highlighted) Color.Black else Color.White
+                    highlighted -> Color(0xFF1E3A8A)
+                    else -> Color(0xFF333333)
+                }
+            )
+            .border(1.dp, if (isEInk) Color.Black else Color.Transparent, RoundedCornerShape(4.dp))
             .clickable { onClick() }
             .padding(horizontal = 7.dp, vertical = 3.dp)
     )
@@ -2287,7 +2442,7 @@ fun WriteToolbarDivider() {
         modifier = Modifier
             .width(1.dp)
             .height(22.dp)
-            .background(Color(0xFF4B5563))
+            .background(if (OnyxEInkBridge.isEInkDevice) Color.Black else Color(0xFF4B5563))
     )
 }
 
@@ -2315,12 +2470,15 @@ fun WritePageSetupModal(
     onInsertImage: ((imageBytes: ByteArray, asBackgroundTemplate: Boolean) -> Unit)? = null,
     onSetTemplateOpacity: ((Float) -> Unit)? = null
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     var width by remember { mutableStateOf(currentSetup.width) }
     var height by remember { mutableStateOf(currentSetup.height) }
     var xRuling by remember { mutableStateOf(currentSetup.xRuling) }
     var yRuling by remember { mutableStateOf(currentSetup.yRuling) }
     var marginLeft by remember { mutableStateOf(currentSetup.marginLeft) }
-    var paperColor by remember { mutableStateOf(currentSetup.paperColorArgb) }
+    var paperColor by remember {
+        mutableStateOf(if (isEInk) 0xFFFFFFFF.toInt() else currentSetup.paperColorArgb)
+    }
     var ruleColor by remember { mutableStateOf(currentSetup.ruleColorArgb) }
     var rulingStyle by remember { mutableStateOf(WriteTemplateStyle.fromNativeCode(currentSetup.rulingStyle)) }
 
@@ -2351,22 +2509,39 @@ fun WritePageSetupModal(
         }
     }
 
-    val paperPresets = listOf(
-        "Warm Cream" to 0xFFFFFDF8.toInt(),
-        "Pure White" to 0xFFFFFFFF.toInt(),
-        "Legal Pad" to 0xFFFFFBEB.toInt(),
-        "Sepia" to 0xFFF5EFE6.toInt(),
-        "Blueprint" to 0xFF0F2942.toInt(),
-        "Blackboard" to 0xFF1E293B.toInt()
-    )
+    // On E-Ink devices, dark paper presets (Blueprint, Blackboard) are omitted so the canvas is always black on light paper.
+    val paperPresets = if (isEInk) {
+        listOf(
+            "Pure White" to 0xFFFFFFFF.toInt(),
+            "Light Gray" to 0xFFF8FAFC.toInt()
+        )
+    } else {
+        listOf(
+            "Warm Cream" to 0xFFFFFDF8.toInt(),
+            "Pure White" to 0xFFFFFFFF.toInt(),
+            "Legal Pad" to 0xFFFFFBEB.toInt(),
+            "Sepia" to 0xFFF5EFE6.toInt(),
+            "Blueprint" to 0xFF0F2942.toInt(),
+            "Blackboard" to 0xFF1E293B.toInt()
+        )
+    }
 
-    val rulePresets = listOf(
-        "Classic Blue" to 0xFF4A90E2.toInt(),
-        "Light Gray" to 0xFF94A3B8.toInt(),
-        "Graph Green" to 0xFF16A34A.toInt(),
-        "Sepia Brown" to 0xFFA16207.toInt(),
-        "Dark Slate" to 0xFF475569.toInt()
-    )
+    val rulePresets = if (isEInk) {
+        listOf(
+            "Crisp Gray" to 0xFF64748B.toInt(),
+            "Dark Slate" to 0xFF334155.toInt(),
+            "Pure Black" to 0xFF000000.toInt(),
+            "Light Gray" to 0xFF94A3B8.toInt()
+        )
+    } else {
+        listOf(
+            "Classic Blue" to 0xFF4A90E2.toInt(),
+            "Light Gray" to 0xFF94A3B8.toInt(),
+            "Graph Green" to 0xFF16A34A.toInt(),
+            "Sepia Brown" to 0xFFA16207.toInt(),
+            "Dark Slate" to 0xFF475569.toInt()
+        )
+    }
 
     val sizePresets = listOf(
         Triple("Current (${currentSetup.width}×${currentSetup.height})", currentSetup.width, currentSetup.height),
@@ -2500,19 +2675,19 @@ fun WritePageSetupModal(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFF1E293B))
-                        .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
+                        .background(if (isEInk) Color(0xFFF8FAFC) else Color(0xFF1E293B))
+                        .border(1.dp, if (isEInk) Color.Black else Color(0xFF334155), RoundedCornerShape(8.dp))
                         .padding(10.dp)
                 ) {
                     Text(
                         text = "Custom Template & Image Designer (Stylus Labs Write `contentToRuling`):",
-                        color = Color(0xFF38BDF8),
+                        color = if (isEInk) Color.Black else Color(0xFF38BDF8),
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 12.sp
                     )
                     Text(
                         text = "Draw any layout, axes, form, or import an image, then lock it into the non-erasable background layer.",
-                        color = Color(0xFF94A3B8),
+                        color = if (isEInk) Color(0xFF334155) else Color(0xFF94A3B8),
                         fontSize = 11.sp
                     )
                     Row(
@@ -2571,7 +2746,7 @@ fun WritePageSetupModal(
                         ) {
                             Text(
                                 text = "Template Opacity:",
-                                color = Color(0xFF94A3B8),
+                                color = if (isEInk) Color(0xFF334155) else Color(0xFF94A3B8),
                                 fontSize = 11.sp
                             )
                             listOf("25%" to 0.25f, "50%" to 0.50f, "75%" to 0.75f, "100%" to 1.0f).forEach { (label, op) ->
@@ -2592,7 +2767,7 @@ fun WritePageSetupModal(
                     text = "Spacing & Margins: X=${xRuling}px • Y=${yRuling}px • Left Margin=${marginLeft}px • Page=${width}×${height}",
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
-                    color = Color(0xFF64748B)
+                    color = if (isEInk) Color.Black else Color(0xFF64748B)
                 )
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -2675,15 +2850,15 @@ fun WritePageSetupModal(
                                 .clip(RoundedCornerShape(6.dp))
                                 .border(
                                     width = if (selected) 2.dp else 1.dp,
-                                    color = if (selected) Color(0xFF0284C7) else Color(0xFF94A3B8),
+                                    color = if (selected) (if (isEInk) Color.Black else Color(0xFF0284C7)) else Color(0xFF94A3B8),
                                     shape = RoundedCornerShape(6.dp)
                                 )
                                 .clickable {
                                     paperColor = argb
-                                    if (argb == 0xFF1E293B.toInt() || argb == 0xFF0F2942.toInt()) {
+                                    if (!isEInk && (argb == 0xFF1E293B.toInt() || argb == 0xFF0F2942.toInt())) {
                                         ruleColor = 0xFF475569.toInt()
                                     } else if (ruleColor == 0xFF475569.toInt()) {
-                                        ruleColor = 0xFF4A90E2.toInt()
+                                        ruleColor = if (isEInk) 0xFF64748B.toInt() else 0xFF4A90E2.toInt()
                                     }
                                 }
                                 .padding(6.dp)
@@ -2714,7 +2889,7 @@ fun WritePageSetupModal(
                                 .clip(RoundedCornerShape(6.dp))
                                 .border(
                                     width = if (selected) 2.dp else 1.dp,
-                                    color = if (selected) Color(0xFF0284C7) else Color(0xFF94A3B8),
+                                    color = if (selected) (if (isEInk) Color.Black else Color(0xFF0284C7)) else Color(0xFF94A3B8),
                                     shape = RoundedCornerShape(6.dp)
                                 )
                                 .clickable { ruleColor = argb }
@@ -2761,17 +2936,32 @@ private fun TemplateChip(
     selected: Boolean,
     onClick: () -> Unit
 ) {
+    val isEInk = OnyxEInkBridge.isEInkDevice
     Text(
         text = label,
-        color = if (selected) Color.White else Color(0xFFCBD5E1),
+        color = when {
+            isEInk -> if (selected) Color.White else Color.Black
+            selected -> Color.White
+            else -> Color(0xFFCBD5E1)
+        },
         fontSize = 12.sp,
         fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
         modifier = Modifier
             .clip(RoundedCornerShape(6.dp))
-            .background(if (selected) Color(0xFF0284C7) else Color(0xFF1E293B))
+            .background(
+                when {
+                    isEInk -> if (selected) Color.Black else Color.White
+                    selected -> Color(0xFF0284C7)
+                    else -> Color(0xFF1E293B)
+                }
+            )
             .border(
                 width = 1.dp,
-                color = if (selected) Color(0xFF38BDF8) else Color(0xFF475569),
+                color = when {
+                    isEInk -> Color.Black
+                    selected -> Color(0xFF38BDF8)
+                    else -> Color(0xFF475569)
+                },
                 shape = RoundedCornerShape(6.dp)
             )
             .clickable { onClick() }

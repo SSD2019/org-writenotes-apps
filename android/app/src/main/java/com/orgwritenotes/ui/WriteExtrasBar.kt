@@ -10,6 +10,7 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -41,6 +42,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.clickable
 import com.orgwritenotes.ink.AudioSession
 import com.orgwritenotes.ink.AudioSketchRecorder
+import com.orgwritenotes.ink.OnyxEInkBridge
 import com.orgwritenotes.ink.StrokeTuning
 import com.orgwritenotes.ink.SvgLayers
 import com.orgwritenotes.ink.WriteCanvasBlockView
@@ -66,6 +68,7 @@ fun WriteExtrasBar(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val isEInk = OnyxEInkBridge.isEInkDevice
     var showLayers by remember { mutableStateOf(false) }
     var showAudio by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
@@ -89,7 +92,8 @@ fun WriteExtrasBar(
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(8.dp))
-            .background(Color(0xD9222222))
+            .background(if (isEInk) Color.White else Color(0xD9222222))
+            .border(1.dp, if (isEInk) Color.Black else Color.Transparent, RoundedCornerShape(8.dp))
             .padding(horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(2.dp)
@@ -97,7 +101,7 @@ fun WriteExtrasBar(
         if (fileName in largeSketches) {
             Text(
                 text = "⚠ Large sketch",
-                color = Color(0xFFFBBF24),
+                color = if (isEInk) Color.Black else Color(0xFFFBBF24),
                 fontSize = 11.sp,
                 modifier = Modifier
                     .padding(horizontal = 6.dp)
@@ -108,7 +112,7 @@ fun WriteExtrasBar(
             val names = presence.joinToString { it.name }
             Text(
                 text = "👥 ${presence.size}",
-                color = Color(0xFF38BDF8),
+                color = if (isEInk) Color.Black else Color(0xFF38BDF8),
                 fontSize = 12.sp,
                 modifier = Modifier
                     .padding(horizontal = 6.dp)
@@ -192,7 +196,7 @@ fun WriteExtrasBar(
 private fun ExtrasChip(label: String, description: String, onClick: () -> Unit) {
     Text(
         text = label,
-        color = Color(0xFFF8FAFC),
+        color = if (OnyxEInkBridge.isEInkDevice) Color.Black else Color(0xFFF8FAFC),
         fontSize = 12.sp,
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier
