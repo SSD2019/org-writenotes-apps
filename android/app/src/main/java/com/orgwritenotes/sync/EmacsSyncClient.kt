@@ -10,6 +10,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -93,6 +95,7 @@ class EmacsSyncClient(
     private var webSocket: WebSocket? = null
     private val rpcIdGenerator = AtomicInteger(1)
     private val pendingCallbacks = ConcurrentHashMap<Int, (JSONObject) -> Unit>()
+    private val pendingErrorCallbacks = ConcurrentHashMap<Int, (String) -> Unit>()
     private val pendingMethods = ConcurrentHashMap<Int, String>()
     /** Bumped per connection attempt so callbacks from a cancelled socket cannot touch newer state. */
     private val connectGeneration = AtomicInteger(0)
@@ -157,6 +160,9 @@ class EmacsSyncClient(
 
     private val _searchNodes = MutableStateFlow<List<OrgNodeSummary>>(emptyList())
     val searchNodes: StateFlow<List<OrgNodeSummary>> = _searchNodes
+    private val _paletteSearchNodes = MutableStateFlow<List<OrgNodeSummary>>(emptyList())
+    /** Command-palette search results, kept apart from the sidebar Search tab's list. */
+    val paletteSearchNodes: StateFlow<List<OrgNodeSummary>> = _paletteSearchNodes
 
     private val _galleryItems = MutableStateFlow<List<OrgGalleryItem>>(emptyList())
     val galleryItems: StateFlow<List<OrgGalleryItem>> = _galleryItems
@@ -350,6 +356,7 @@ class EmacsSyncClient(
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 if (gen != connectGeneration.get()) return
                 pendingCallbacks.clear()
+                pendingErrorCallbacks.clear()
                 pendingMethods.clear()
                 val errorDetail = when {
                     t is java.net.ConnectException -> "Connection refused. Is Emacs running (M-x org-writenotes-start-server)?"
@@ -370,6 +377,7 @@ class EmacsSyncClient(
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 if (gen != connectGeneration.get()) return
                 pendingCallbacks.clear()
+                pendingErrorCallbacks.clear()
                 pendingMethods.clear()
                 _connectionState.value = if (_activeSnapshot.value != null) {
                     ConnectionState.OFFLINE_CACHED
@@ -399,12 +407,14 @@ class EmacsSyncClient(
                         tags = obj.optJSONArray("tags")?.toStringList() ?: emptyList(),
                         scheduled = obj.optString("scheduled").takeIf { it.isNotEmpty() && it != "null" },
                         deadline = obj.optString("deadline").takeIf { it.isNotEmpty() && it != "null" },
-                        sketchCount = obj.optInt("sketchCount", 0)
+                        sketchCount = obj.optInt("sketchCount", 0),
+                        agendaLabel = obj.optString("agendaLabel").takeIf { it.isNotEmpty() && it != "null" }
                     )
                 )
             }
         }
-        return list
+        // LazyColumn keys rows by nodeId; a duplicate key would crash the sidebar.
+        return list.distinctBy { it.nodeId }
     }
 
     fun refreshNodeList(query: String = "") {
@@ -443,13 +453,29 @@ class EmacsSyncClient(
         }
     }
 
+    private val searchSeq = AtomicInteger(0)
+
+    private val paletteSearchSeq = AtomicInteger(0)
+
+    fun searchNodesForPalette(query: String) {
+        val params = JSONObject().put("filter", "search").put("query", query)
+        val seq = paletteSearchSeq.incrementAndGet()
+        sendRpc("node.list", params, queueIfOffline = false) { result ->
+            if (seq == paletteSearchSeq.get()) _paletteSearchNodes.value = parseSummaryList(result.optJSONArray("nodes"))
+        }
+    }
+
     fun searchNodes(query: String) {
         val params = JSONObject().apply {
             put("filter", "search")
             put("query", query)
         }
+        // Responses can arrive out of order while typing; only the latest query's results win.
+        val seq = searchSeq.incrementAndGet()
         sendRpc("node.list", params, queueIfOffline = false) { result ->
-            _searchNodes.value = parseSummaryList(result.optJSONArray("nodes"))
+            if (seq == searchSeq.get()) {
+                _searchNodes.value = parseSummaryList(result.optJSONArray("nodes"))
+            }
         }
     }
 
@@ -1038,8 +1064,12 @@ class EmacsSyncClient(
         _largeSketches.update { if (base64Length > LARGE_SKETCH_BASE64_CHARS) it + file else it - file }
     }
 
+    /** Node each conflicted sketch belongs to, so the resolution RPC can locate its file. */
+    private val conflictNodeIds = ConcurrentHashMap<String, String>()
+
     private fun sendInkCommit(params: JSONObject) {
         val file = params.optString("fileName")
+        params.optString("nodeId").takeIf { it.isNotEmpty() }?.let { conflictNodeIds[file] = it }
         trackSketchSize(file, params.optString("svgzBase64").length)
         knownEtags[file]?.let { if (!params.has("baseEtag")) params.put("baseEtag", it) }
         writeRecovery(params)
@@ -1102,6 +1132,82 @@ class EmacsSyncClient(
 
     fun clearConflict(fileName: String) {
         _conflictedFiles.update { it - fileName }
+    }
+
+    /** Both versions of a conflicted sketch: what Emacs has on disk and the tablet's conflict copy. */
+    data class SketchConflict(
+        val fileName: String,
+        val nodeId: String,
+        val conflictFile: String,
+        val conflictCount: Int,
+        val emacsSvgzBase64: String,
+        val tabletSvgzBase64: String
+    )
+
+    private val _sketchReloads = MutableSharedFlow<Pair<String, String>>(extraBufferCapacity = 4)
+    /** (fileName, svgzBase64) to load into open canvases after Emacs replaced the sketch (conflict resolution). */
+    val sketchReloads: SharedFlow<Pair<String, String>> = _sketchReloads
+
+    fun conflictNodeId(fileName: String): String? =
+        conflictNodeIds[fileName] ?: _activeSnapshot.value?.takeIf { snap ->
+            snap.blocks.any { it is OrgBlock.InkCanvasBlock && it.fileName == fileName }
+        }?.nodeId
+
+    fun fetchConflictInfo(fileName: String, onResult: (SketchConflict?, String?) -> Unit) {
+        val nodeId = conflictNodeId(fileName)
+        val params = JSONObject().put("fileName", fileName).apply { nodeId?.let { put("nodeId", it) } }
+        val sent = sendRpc("ink.conflictInfo", params, onError = { msg -> onResult(null, msg) }) { r ->
+            onResult(
+                SketchConflict(
+                    fileName = fileName,
+                    nodeId = nodeId.orEmpty(),
+                    conflictFile = r.optString("conflictFile"),
+                    conflictCount = r.optInt("conflictCount", 1),
+                    emacsSvgzBase64 = r.optString("emacsSvgzBase64"),
+                    tabletSvgzBase64 = r.optString("tabletSvgzBase64")
+                ),
+                null
+            )
+        }
+        if (!sent) onResult(null, "Not connected to Emacs")
+    }
+
+    /**
+     * Resolves a sketch conflict on the Emacs side. [choice] is "emacs", "tablet" or "merged"
+     * (then [mergedSvgzBase64] is written). Pending local commits of the stale content are dropped
+     * first so they can't overwrite the resolution; the node is re-fetched so canvases reload.
+     */
+    fun resolveConflict(
+        conflict: SketchConflict,
+        choice: String,
+        mergedSvgzBase64: String? = null,
+        onDone: (String?) -> Unit
+    ) {
+        val file = conflict.fileName
+        commitDebounceJobs.remove(file)?.cancel()
+        pendingInkCommits.remove(file)?.let { abandoned -> runCatching { abandoned.exportSvgzBase64Provider(false) } }
+        offlineMutationQueue.removeAll { it.method == "ink.commit" && it.fileName == file }
+        _pendingOfflineCount.value = offlineMutationQueue.size
+        persistOfflineQueueToDisk()
+        clearRecovery(file)
+
+        val params = JSONObject()
+            .put("fileName", file)
+            .put("conflictFile", conflict.conflictFile)
+            .put("choice", choice)
+        if (conflict.nodeId.isNotEmpty()) params.put("nodeId", conflict.nodeId)
+        if (mergedSvgzBase64 != null) params.put("svgzBase64", mergedSvgzBase64)
+        val sent = sendRpc("ink.resolveConflict", params, onError = { msg -> onDone(msg) }) { r ->
+            r.optString("etag").takeIf { it.isNotEmpty() }?.let { knownEtags[file] = it }
+            r.optString("svgzBase64").takeIf { it.isNotEmpty() }?.let { _sketchReloads.tryEmit(file to it) }
+            if (r.optInt("remainingConflicts", 0) == 0) {
+                _conflictedFiles.update { it - file }
+                conflictNodeIds.remove(file)
+            }
+            if (conflict.nodeId.isNotEmpty()) fetchNode(conflict.nodeId)
+            onDone(null)
+        }
+        if (!sent) onDone("Not connected to Emacs")
     }
 
     /** A2: list historical snapshots of a sketch. */
@@ -1176,6 +1282,7 @@ class EmacsSyncClient(
         method: String,
         params: JSONObject,
         queueIfOffline: Boolean = false,
+        onError: ((String) -> Unit)? = null,
         onResult: ((JSONObject) -> Unit)? = null
     ): Boolean {
         val ws = webSocket
@@ -1191,6 +1298,9 @@ class EmacsSyncClient(
         if (onResult != null) {
             pendingCallbacks[id] = onResult
         }
+        if (onError != null) {
+            pendingErrorCallbacks[id] = onError
+        }
         val envelope = JSONObject().apply {
             put("jsonrpc", "2.0")
             put("id", id)
@@ -1200,6 +1310,7 @@ class EmacsSyncClient(
         val sent = ws.send(envelope.toString())
         if (!sent) {
             pendingCallbacks.remove(id)
+            pendingErrorCallbacks.remove(id)
             pendingMethods.remove(id)
             if (queueIfOffline) enqueueOfflineMutation(method, params)
         }
@@ -1388,6 +1499,7 @@ class EmacsSyncClient(
             val id = msg.getInt("id")
             val result = msg.optJSONObject("result") ?: JSONObject()
             pendingMethods.remove(id)
+            pendingErrorCallbacks.remove(id)
             pendingCallbacks.remove(id)?.invoke(result)
         } else if (msg.has("id") && msg.has("error")) {
             val id = msg.getInt("id")
@@ -1395,6 +1507,7 @@ class EmacsSyncClient(
             val errMsg = errObj?.optString("message") ?: "RPC Error"
             android.util.Log.e("EmacsSyncClient", "RPC id $id returned error: $errMsg")
             pendingCallbacks.remove(id)
+            pendingErrorCallbacks.remove(id)?.invoke(errMsg)
             val failedMethod = pendingMethods.remove(id)
             // Re-fetch the node after a failed mutation to resync the UI; never after a failed read
             // (that would loop on a missing node) or a streaming ink call.

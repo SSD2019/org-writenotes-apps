@@ -25,6 +25,9 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 
+private const val RADIAL_HOLD_MS = 550L
+private const val RADIAL_HOLD_SLOP_PX = 36f
+
 enum class StylusToolMode {
     PAN,
     PEN,
@@ -90,9 +93,6 @@ data class WritePageSetupState(
 object WriteNativeBridge {
     var isNativeLoaded = false
         private set
-
-    /** Cross-canvas SVG clipboard for Copy / Cut / Paste between sketches */
-    var clipboardSvgXml: String = ""
 
     init {
         try {
@@ -605,7 +605,8 @@ class WriteCanvasBlockView(
         }
         val shouldUseRawDrawing = (toolMode == StylusToolMode.PEN || toolMode == StylusToolMode.HIGHLIGHTER) &&
             !selectionState.hasSelection &&
-            !lineDrawing
+            !lineDrawing &&
+            !radialMenuOpen
         if (shouldUseRawDrawing) {
             val effZoom = if (isZoomedMode) zoomScale else 1.0f
             refreshOnyxLimit()
@@ -1804,7 +1805,7 @@ class WriteCanvasBlockView(
         if (nativeHandle == 0L || !selectionState.hasSelection) return false
         val svg = WriteNativeBridge.nativeCopySelectionSvg(nativeHandle)
         if (svg.isNotBlank()) {
-            WriteNativeBridge.clipboardSvgXml = svg
+            StrokeClipboard.set(svg, selectionState.count, selectionState.bounds)
             return true
         }
         return false
@@ -1817,7 +1818,7 @@ class WriteCanvasBlockView(
     }
 
     fun hasClipboardStrokes(): Boolean {
-        if (WriteNativeBridge.clipboardSvgXml.isNotBlank()) return true
+        if (StrokeClipboard.hasStrokes) return true
         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
         val clip = cm?.primaryClip
         if (clip != null && clip.itemCount > 0 && clip.getItemAt(0).uri != null) {
@@ -1828,17 +1829,17 @@ class WriteCanvasBlockView(
 
     fun pasteClipboardStrokes(): Boolean {
         if (nativeHandle == 0L) return false
-        if (WriteNativeBridge.clipboardSvgXml.isNotBlank()) {
+        if (StrokeClipboard.hasStrokes) {
             val oldW = canvasWidthPx
             val oldH = canvasHeightPx
             val bounds = tmpBounds4
             val dims = tmpDims2
-            val step = if (yRuling > 0) yRuling.toFloat() else 32f
+            val (offX, offY) = pasteOffset()
             val count = WriteNativeBridge.nativePasteSelectionSvg(
                 nativeHandle,
-                WriteNativeBridge.clipboardSvgXml,
-                step,
-                step,
+                StrokeClipboard.svg,
+                offX,
+                offY,
                 bounds,
                 dims
             )
@@ -1884,6 +1885,32 @@ class WriteCanvasBlockView(
             }
         }
         return false
+    }
+
+    /**
+     * Offset for a paste: one ruling step from the source position when that spot is on screen
+     * (paste right after copy in the same sketch), otherwise re-anchored to the top-left of the
+     * part of this canvas the user is looking at, so strokes from another sketch land in view.
+     */
+    private fun pasteOffset(): Pair<Float, Float> {
+        val step = if (yRuling > 0) yRuling.toFloat() else 32f
+        val src = StrokeClipboard.sourceBounds ?: return step to step
+        val vis = Rect()
+        if (!getLocalVisibleRect(vis) || vis.isEmpty) return step to step
+        val view = RectF(
+            max(0f, screenToCanvasX(vis.left.toFloat())),
+            max(0f, screenToCanvasY(vis.top.toFloat())),
+            min(canvasWidthPx.toFloat(), screenToCanvasX(vis.right.toFloat())),
+            screenToCanvasY(vis.bottom.toFloat())
+        )
+        val stepped = RectF(src).apply { offset(step, step) }
+        if (view.contains(stepped)) return step to step
+        val margin = step
+        val targetLeft = view.left + margin
+        // Snap the top edge to the ruling so pasted handwriting sits on the lines.
+        val rawTop = view.top + margin
+        val targetTop = if (yRuling > 0) (Math.round(rawTop / yRuling) * yRuling).toFloat() else rawTop
+        return (targetLeft - src.left) to (targetTop - src.top)
     }
 
     fun recognizeSelectionOcr(): String {
@@ -2134,12 +2161,54 @@ class WriteCanvasBlockView(
         }
     }
 
+    /** True while the radial pen menu is open over this canvas; keeps the Onyx pen layer from inking over it. */
+    var radialMenuOpen: Boolean = false
+        set(value) {
+            if (field != value) {
+                field = value
+                syncOnyxRawDrawingState()
+            }
+        }
+
+    // Radial pen menu: barrel button held while hovering (pen not touching) for RADIAL_HOLD_MS.
+    // Holding the button while touching keeps its eraser / lasso meaning.
+    private var radialHoldArmed = false
+    private var radialHoldX = 0f
+    private var radialHoldY = 0f
+    private val radialHoldRunnable = Runnable {
+        radialHoldArmed = false
+        val loc = IntArray(2)
+        getLocationInWindow(loc)
+        RadialMenuBus.open(this, loc[0] + radialHoldX, loc[1] + radialHoldY)
+    }
+
+    private fun cancelRadialHold() {
+        if (radialHoldArmed) {
+            radialHoldArmed = false
+            removeCallbacks(radialHoldRunnable)
+        }
+    }
+
     override fun onHoverEvent(event: MotionEvent): Boolean {
         if (event.pointerCount > 0 && event.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS) {
             lastStylusActivityMs = event.eventTime
         }
         val buttons = event.buttonState and
             (MotionEvent.BUTTON_STYLUS_PRIMARY or MotionEvent.BUTTON_STYLUS_SECONDARY)
+        val hovering = event.actionMasked == MotionEvent.ACTION_HOVER_ENTER ||
+            event.actionMasked == MotionEvent.ACTION_HOVER_MOVE
+        if (buttons != 0 && hovering && event.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS) {
+            if (!radialHoldArmed) {
+                radialHoldArmed = true
+                radialHoldX = event.x
+                radialHoldY = event.y
+                postDelayed(radialHoldRunnable, RADIAL_HOLD_MS)
+            } else if (hypot(event.x - radialHoldX, event.y - radialHoldY) > RADIAL_HOLD_SLOP_PX) {
+                cancelRadialHold()
+            }
+        } else {
+            cancelRadialHold()
+        }
         val lassoButton = barrelButtonLassoMode ||
             (buttons and MotionEvent.BUTTON_STYLUS_PRIMARY) == 0
         lastEraserButtonMs = if (buttons != 0 && !lassoButton) event.eventTime else 0L

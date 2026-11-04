@@ -13,7 +13,9 @@ data class OrgNodeSummary(
     val tags: List<String> = emptyList(),
     val scheduled: String? = null,
     val deadline: String? = null,
-    val sketchCount: Int = 0
+    val sketchCount: Int = 0,
+    /** Emacs day-agenda label, e.g. "14:30", "Scheduled", "Sched.3x", "In 2 d.". */
+    val agendaLabel: String? = null
 )
 
 data class OrgSubheadingItem(

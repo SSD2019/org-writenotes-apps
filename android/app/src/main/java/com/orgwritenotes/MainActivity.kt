@@ -37,6 +37,7 @@ class MainActivity : ComponentActivity() {
         handleShareIntent(intent)
 
         com.orgwritenotes.ui.UiPrefs.load(applicationContext)
+        com.orgwritenotes.ink.StrokeClipboard.load(applicationContext)
 
         setContent {
             // B8: user text-size multiplier on top of the system font scale.
@@ -65,6 +66,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    // Hardware keyboard shortcuts (Ctrl+K palette, C-c w chords, …) see keys before focused widgets.
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (com.orgwritenotes.ui.TabletKeyDispatcher.handler?.invoke(event) == true) return true
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onNewIntent(intent: Intent) {
