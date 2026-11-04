@@ -1025,7 +1025,7 @@ private fun HybridNodeEditorPane(
     }
     // Sync adaptive theme from Emacs to all active canvas views (always light on E-Ink)
     val emacsTheme by syncClient.emacsTheme.collectAsState()
-    LaunchedEffect(emacsTheme, canvasViews.values.toList(), isEInk) {
+    LaunchedEffect(emacsTheme, canvasViews.size, isEInk) {
         val effectiveDark = !isEInk && emacsTheme.isDark
         val bgArgb = emacsTheme.resolvedDarkBgArgb()
         val fgArgb = emacsTheme.resolvedDarkFgArgb()
@@ -1842,7 +1842,11 @@ private fun HybridNodeEditorPane(
                                 lineDrawing = lineDrawing,
                                 syncClient = syncClient,
                                 onRegisterView = { view ->
-                                    canvasViews[block.blockId] = view
+                                    if (canvasViews[block.blockId] !== view) canvasViews[block.blockId] = view
+                                },
+                                onUnregisterView = { view ->
+                                    // Scrolled off / deleted: drop the reference so detached native views aren't retained.
+                                    if (canvasViews[block.blockId] === view) canvasViews.remove(block.blockId)
                                 },
                                 onActivateDrawing = { view ->
                                     val switchedBlock = activeInkBlockId != block.blockId
@@ -2886,6 +2890,7 @@ private fun InkCanvasBlockCard(
     lineDrawing: Boolean = false,
     syncClient: EmacsSyncClient,
     onRegisterView: (WriteCanvasBlockView) -> Unit,
+    onUnregisterView: (WriteCanvasBlockView) -> Unit,
     onActivateDrawing: (WriteCanvasBlockView) -> Unit,
     onActiveStateUpdated: (
         canUndo: Boolean,
@@ -3017,6 +3022,7 @@ private fun InkCanvasBlockCard(
                         canvasHeightPx = view.canvasHeightPx
                     }
                 },
+                onRelease = { view -> onUnregisterView(view) },
                 modifier = Modifier.fillMaxSize()
             )
 

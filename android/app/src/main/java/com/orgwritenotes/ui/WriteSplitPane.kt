@@ -61,7 +61,9 @@ fun WriteSplitPane(
     val isEInk = OnyxEInkBridge.isEInkDevice
     val snapshot by syncClient.activeSnapshot.collectAsState()
     val blocks = snapshot?.takeIf { it.nodeId == nodeId }?.blocks.orEmpty()
-    val otherSketches = blocks.filterIsInstance<OrgBlock.InkCanvasBlock>().filter { it.fileName != currentFileName }
+    val otherSketches = remember(blocks, currentFileName) {
+        blocks.filterIsInstance<OrgBlock.InkCanvasBlock>().filter { it.fileName != currentFileName }
+    }
 
     Column(
         modifier = modifier
@@ -126,7 +128,7 @@ private fun PaneTab(label: String, selected: Boolean, description: String, onCli
 private fun TextPane(blocks: List<OrgBlock>) {
     val isEInk = OnyxEInkBridge.isEInkDevice
     val textColor = if (isEInk) Color.Black else Color(0xFFE2E8F0)
-    val textBlocks = blocks.filter { it !is OrgBlock.InkCanvasBlock }
+    val textBlocks = remember(blocks) { blocks.filter { it !is OrgBlock.InkCanvasBlock } }
     if (textBlocks.isEmpty()) {
         Text(
             "This node has no text.",
@@ -136,7 +138,7 @@ private fun TextPane(blocks: List<OrgBlock>) {
         return
     }
     LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(textBlocks) { b ->
+        items(textBlocks, key = { it.blockId }) { b ->
             when (b) {
                 is OrgBlock.ParagraphBlock -> Text(b.text, color = textColor, fontSize = 14.sp)
                 is OrgBlock.ChecklistBlock -> Column {

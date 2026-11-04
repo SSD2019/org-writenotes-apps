@@ -951,17 +951,22 @@ class EmacsSyncClient(
                 pending.canvasHeight,
                 svgzBase64
             )
-            val ocrText = HandwritingOcrEngine.extractTextFromSvgzBase64(svgzBase64)
-            val commitParams = JSONObject().apply {
-                put("nodeId", pending.nodeId)
-                put("fileName", pending.fileName)
-                put("width", pending.canvasWidth)
-                put("height", pending.canvasHeight)
-                put("svgzBase64", svgzBase64)
-                if (ocrText.isNotBlank()) put("ocrText", ocrText)
-            }
-            sendInkCommit(commitParams)
+            commitSvgz(pending.nodeId, pending.fileName, pending.canvasWidth, pending.canvasHeight, svgzBase64)
         }
+    }
+
+    /** OCR-indexes and sends a full `.svgz` commit; heavy (decompress + recognise), so call off the UI thread. */
+    private fun commitSvgz(nodeId: String, fileName: String, canvasWidth: Int, canvasHeight: Int, svgzBase64: String) {
+        val ocrText = HandwritingOcrEngine.extractTextFromSvgzBase64(svgzBase64)
+        val commitParams = JSONObject().apply {
+            put("nodeId", nodeId)
+            put("fileName", fileName)
+            put("width", canvasWidth)
+            put("height", canvasHeight)
+            put("svgzBase64", svgzBase64)
+            if (ocrText.isNotBlank()) put("ocrText", ocrText)
+        }
+        sendInkCommit(commitParams)
     }
 
     private fun updateLocalBlockSvgz(
@@ -1003,16 +1008,8 @@ class EmacsSyncClient(
         }
         if (svgzBase64.isEmpty()) return
         updateLocalBlockSvgz(nodeId, fileName, canvasWidth, canvasHeight, svgzBase64)
-        val ocrText = HandwritingOcrEngine.extractTextFromSvgzBase64(svgzBase64)
-        val commitParams = JSONObject().apply {
-            put("nodeId", nodeId)
-            put("fileName", fileName)
-            put("width", canvasWidth)
-            put("height", canvasHeight)
-            put("svgzBase64", svgzBase64)
-            if (ocrText.isNotBlank()) put("ocrText", ocrText)
-        }
-        sendInkCommit(commitParams)
+        // Callers are on the UI thread: keep OCR, recovery-file I/O and JSON building off it.
+        scope.launch(Dispatchers.IO) { commitSvgz(nodeId, fileName, canvasWidth, canvasHeight, svgzBase64) }
     }
 
     // --- A3 / A7: etag tracking & conflict surfacing -------------------------
@@ -1246,8 +1243,10 @@ class EmacsSyncClient(
             val summary = summaryFromSnapshot(snap)
             val updatedHistory = (listOf(summary) + _nodeSummaries.value.filterNot { it.nodeId == snap.nodeId })
                 .take(50)
-            _nodeSummaries.value = updatedHistory
-            saveCachedSummariesToDisk(updatedHistory)
+            if (updatedHistory != _nodeSummaries.value) {
+                _nodeSummaries.value = updatedHistory
+                saveCachedSummariesToDisk(updatedHistory)
+            }
         }
     }
 
@@ -1268,14 +1267,19 @@ class EmacsSyncClient(
         })
     }
 
+    private val latestSnapshotToSave = java.util.concurrent.atomic.AtomicReference<Pair<String, JSONObject>?>(null)
+
+    /** Coalesces bursts (echoed edits) so only the newest snapshot is serialised and written. */
     private fun saveCachedSnapshotToDisk(nodeId: String, obj: JSONObject) {
         val db = store ?: return
+        if (latestSnapshotToSave.getAndSet(nodeId to obj) != null) return // a writer is already queued
         scope.launch(Dispatchers.IO) {
+            val (id, latest) = latestSnapshotToSave.getAndSet(null) ?: return@launch
             runCatching {
-                val text = obj.toString()
-                if (nodeId.isNotEmpty()) {
-                    db.putKv(OfflineStore.snapshotKey(nodeId), text)
-                    db.putKv(OfflineStore.KEY_ACTIVE_NODE, nodeId)
+                val text = latest.toString()
+                if (id.isNotEmpty()) {
+                    db.putKv(OfflineStore.snapshotKey(id), text)
+                    db.putKv(OfflineStore.KEY_ACTIVE_NODE, id)
                 } else {
                     db.putKv(OfflineStore.KEY_ACTIVE_SNAPSHOT, text)
                 }
