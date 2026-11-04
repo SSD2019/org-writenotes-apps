@@ -45,6 +45,8 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.viewinterop.AndroidView
 import com.orgwritenotes.ink.OnyxEInkBridge
 import com.orgwritenotes.ink.StylusToolMode
@@ -1023,6 +1025,8 @@ private fun HybridNodeEditorPane(
     val canvasViews = remember(snapshot.nodeId) {
         mutableStateMapOf<String, WriteCanvasBlockView>()
     }
+    // Window bounds of the scrolling block list: the Onyx pen layer must not paint outside it (e.g. over the toolbar).
+    var blockListClip by remember { mutableStateOf<android.graphics.Rect?>(null) }
     // Sync adaptive theme from Emacs to all active canvas views (always light on E-Ink)
     val emacsTheme by syncClient.emacsTheme.collectAsState()
     LaunchedEffect(emacsTheme, canvasViews.size, isEInk) {
@@ -1691,7 +1695,13 @@ private fun HybridNodeEditorPane(
         LazyColumn(
             state = lazyListState,
             verticalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.weight(1f)
+            modifier = Modifier
+                .weight(1f)
+                .onGloballyPositioned { c ->
+                    val b = c.boundsInWindow()
+                    val r = android.graphics.Rect(b.left.toInt(), b.top.toInt(), b.right.toInt(), b.bottom.toInt())
+                    if (blockListClip != r) blockListClip = r
+                }
         ) {
             if (snapshot.blocks.isEmpty()) {
                 item(key = "empty-node-placeholder") {
@@ -1842,6 +1852,7 @@ private fun HybridNodeEditorPane(
                                 lineDrawing = lineDrawing,
                                 syncClient = syncClient,
                                 onRegisterView = { view ->
+                                    view.rawClipWindowRect = blockListClip
                                     if (canvasViews[block.blockId] !== view) canvasViews[block.blockId] = view
                                 },
                                 onUnregisterView = { view ->

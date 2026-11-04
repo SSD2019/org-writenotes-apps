@@ -21,6 +21,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
+import androidx.compose.ui.composed
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
@@ -1883,6 +1888,8 @@ fun WriteZoomedEditorOverlay(
             onToggleDarkCanvasTheme = if (isEInk) null else ({ syncClient.toggleCanvasDarkMode() })
         )
 
+        val overlayRects = remember { mutableStateMapOf<String, android.graphics.Rect>() }
+        var showMinimap by remember { mutableStateOf(false) }
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -1967,6 +1974,7 @@ fun WriteZoomedEditorOverlay(
                 },
                 update = { view ->
                     view.setAdaptiveTheme(effectiveDark, bgArgb, fgArgb)
+                    view.rawExcludeWindowRects = overlayRects.values.toList()
                 },
                 modifier = Modifier.fillMaxSize()
             )
@@ -1983,6 +1991,7 @@ fun WriteZoomedEditorOverlay(
                         .align(Alignment.CenterEnd)
                         .fillMaxHeight()
                         .fillMaxWidth(0.45f)
+                        .trackWindowRect(overlayRects, "split")
                 )
             }
 
@@ -1996,6 +2005,7 @@ fun WriteZoomedEditorOverlay(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(12.dp)
+                    .trackWindowRect(overlayRects, "extras")
             )
 
             if (selectionState.hasSelection) {
@@ -2020,6 +2030,7 @@ fun WriteZoomedEditorOverlay(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .padding(top = 12.dp)
+                        .trackWindowRect(overlayRects, "selection")
                 )
             }
 
@@ -2030,6 +2041,7 @@ fun WriteZoomedEditorOverlay(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .padding(12.dp)
+                    .trackWindowRect(overlayRects, "statusbar")
                     .clip(RoundedCornerShape(8.dp))
                     .background(if (isEInk) Color.White else Color(0xD9222222))
                     .border(1.dp, if (isEInk) Color.Black else Color(0xFF3F3F46), RoundedCornerShape(8.dp))
@@ -2070,7 +2082,6 @@ fun WriteZoomedEditorOverlay(
                 }
 
                 // B2: Minimap viewport indicator toggle
-                var showMinimap by remember { mutableStateOf(false) }
                 StatusbarMiniPill(
                     label = if (showMinimap) "Map: On" else "Map",
                     highlighted = showMinimap
@@ -2080,11 +2091,12 @@ fun WriteZoomedEditorOverlay(
             }
 
             // B2: Canvas Minimap / Viewport navigator
-            canvasViewRef?.let { cv ->
+            canvasViewRef?.takeIf { showMinimap }?.let { cv ->
                 Box(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .padding(12.dp)
+                        .trackWindowRect(overlayRects, "minimap")
                         .size(width = 110.dp, height = 75.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(if (isEInk) Color.White else Color(0xCC0F172A))
@@ -2093,8 +2105,10 @@ fun WriteZoomedEditorOverlay(
                     val mapAspect = (pageSetup.width.toFloat() / pageSetup.height.coerceAtLeast(100).toFloat()).coerceIn(0.5f, 2.5f)
                     val vpLeftNorm = (-cv.panOffsetX / (pageSetup.width * cv.zoomScale)).coerceIn(0f, 1f)
                     val vpTopNorm = (-cv.panOffsetY / (pageSetup.height * cv.zoomScale)).coerceIn(0f, 1f)
-                    val vpWNorm = (1f / cv.zoomScale.coerceAtLeast(0.1f)).coerceIn(0.1f, 1f)
-                    val vpHNorm = (1f / cv.zoomScale.coerceAtLeast(0.1f)).coerceIn(0.1f, 1f)
+                    val vpWNorm = (cv.width / (pageSetup.width * cv.zoomScale).coerceAtLeast(1f)).coerceIn(0.05f, 1f)
+                    val vpHNorm = (cv.height / (pageSetup.height * cv.zoomScale).coerceAtLeast(1f)).coerceIn(0.05f, 1f)
+                    val vpXBias = if (vpWNorm >= 0.999f) 0f else (vpLeftNorm.coerceIn(0f, 1f - vpWNorm) / (1f - vpWNorm)) * 2f - 1f
+                    val vpYBias = if (vpHNorm >= 0.999f) 0f else (vpTopNorm.coerceIn(0f, 1f - vpHNorm) / (1f - vpHNorm)) * 2f - 1f
 
                     Box(
                         modifier = Modifier
@@ -2110,6 +2124,7 @@ fun WriteZoomedEditorOverlay(
                         // Viewport window box in minimap
                         Box(
                             modifier = Modifier
+                                .align(BiasAlignment(vpXBias, vpYBias))
                                 .fillMaxWidth(vpWNorm)
                                 .fillMaxHeight(vpHNorm)
                                 .border(1.dp, if (isEInk) Color.Black else Color(0xFF38BDF8), RoundedCornerShape(2.dp))
@@ -2435,6 +2450,17 @@ private fun StatusbarMiniPill(
             .padding(horizontal = 7.dp, vertical = 3.dp)
     )
 }
+
+/** Reports this element's window bounds into [rects] while composed, so the Onyx pen layer can avoid it. */
+private fun Modifier.trackWindowRect(rects: SnapshotStateMap<String, android.graphics.Rect>, key: String): Modifier =
+    composed {
+        DisposableEffect(key) { onDispose { rects.remove(key) } }
+        onGloballyPositioned { c ->
+            val b = c.boundsInWindow()
+            val r = android.graphics.Rect(b.left.roundToInt(), b.top.roundToInt(), b.right.roundToInt(), b.bottom.roundToInt())
+            if (rects[key] != r) rects[key] = r
+        }
+    }
 
 @Composable
 fun WriteToolbarDivider() {

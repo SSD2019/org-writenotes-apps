@@ -182,6 +182,14 @@ object OnyxEInkBridge {
                 // must be the view's local visible rect, not its on-screen (global) rect.
                 val rect = Rect()
                 if (!view.getLocalVisibleRect(rect) || rect.isEmpty) return
+                applyLimitRect(rect, excludeRects)
+            } catch (_: Throwable) {
+            }
+        }
+
+        /** Sets the pen layer's drawing region (view-local coordinates) and exclusions explicitly. */
+        fun applyLimitRect(rect: Rect, excludeRects: List<Rect>) {
+            try {
                 // Limit changes only take effect when raw drawing is (re)armed.
                 val wasActive = isRawDrawingActive
                 if (wasActive) touchHelper.setRawDrawingEnabled(false)

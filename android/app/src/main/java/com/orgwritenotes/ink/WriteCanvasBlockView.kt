@@ -7,6 +7,7 @@ import android.graphics.Canvas
 import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.Rect
 import android.graphics.RectF
 import android.util.Base64
 import android.view.MotionEvent
@@ -536,6 +537,64 @@ class WriteCanvasBlockView(
         }
     }
 
+    /** Window-space region (e.g. the scrolling list) the Onyx pen layer must stay inside; null = whole view. */
+    var rawClipWindowRect: Rect? = null
+        set(value) {
+            if (field == value) return
+            field = value
+            refreshOnyxLimit()
+        }
+
+    /** Window-space rects of overlays (extras bar, split pane, ...) the Onyx pen layer must not draw over. */
+    var rawExcludeWindowRects: List<Rect> = emptyList()
+        set(value) {
+            if (field == value) return
+            field = value
+            refreshOnyxLimit()
+        }
+
+    private var lastOnyxLimitKey: Pair<Rect, List<Rect>>? = null
+    private val onyxLocScratch = IntArray(2)
+
+    /**
+     * The hardware pen layer paints above all views, so its region must track where this view is
+     * actually visible and unobstructed. Cheap to call often: it only re-arms the SDK when the region changed.
+     */
+    /** Keeps at least a margin of the page on screen so a fling/zoom can never lose it off-canvas. */
+    private fun clampPan() {
+        if (!isZoomedMode || width <= 0 || height <= 0) return
+        val margin = 96f
+        val pageW = canvasWidthPx * zoomScale
+        val pageH = canvasHeightPx * zoomScale
+        panOffsetX = panOffsetX.coerceIn(minOf(margin - pageW, width - margin), maxOf(margin - pageW, width - margin))
+        panOffsetY = panOffsetY.coerceIn(minOf(margin - pageH, height - margin), maxOf(margin - pageH, height - margin))
+    }
+
+    private fun refreshOnyxLimit() {
+        val session = onyxRawSession ?: return
+        if (isOnyxRawStrokeInProgress || isOnyxRawEraseInProgress) return
+        val vis = Rect()
+        if (!getLocalVisibleRect(vis) || vis.isEmpty) return
+        getLocationInWindow(onyxLocScratch)
+        val ox = onyxLocScratch[0]
+        val oy = onyxLocScratch[1]
+        rawClipWindowRect?.let { c ->
+            if (!vis.intersect(c.left - ox, c.top - oy, c.right - ox, c.bottom - oy)) return
+        }
+        val excludes = rawExcludeWindowRects
+            .map { Rect(it.left - ox, it.top - oy, it.right - ox, it.bottom - oy) }
+            .filter { Rect.intersects(it, vis) }
+        val key = Rect(vis) to excludes
+        if (key == lastOnyxLimitKey) return
+        lastOnyxLimitKey = key
+        session.applyLimitRect(vis, excludes)
+    }
+
+    private val onyxLimitPreDraw = android.view.ViewTreeObserver.OnPreDrawListener {
+        refreshOnyxLimit()
+        true
+    }
+
     private fun syncOnyxRawDrawingState() {
         val session = onyxRawSession ?: return
         if (isOnyxRawStrokeInProgress || isOnyxRawEraseInProgress) {
@@ -549,7 +608,7 @@ class WriteCanvasBlockView(
             !lineDrawing
         if (shouldUseRawDrawing) {
             val effZoom = if (isZoomedMode) zoomScale else 1.0f
-            session.updateLimitRect(this)
+            refreshOnyxLimit()
             session.configureStroke(penWidthPx * effZoom, resolveLivePreviewStrokeColor())
             session.setRawDrawingEnabled(true, renderToEpd = true)
         } else {
@@ -826,6 +885,7 @@ class WriteCanvasBlockView(
                 panOffsetX = focusX - (focusX - panOffsetX) * (newScale / prevScale)
                 panOffsetY = focusY - (focusY - panOffsetY) * (newScale / prevScale)
                 zoomScale = newScale
+                clampPan()
                 val newPct = (newScale * 100f).roundToInt()
                 if (newPct != lastReportedZoomPct) {
                     lastReportedZoomPct = newPct
@@ -1538,6 +1598,7 @@ class WriteCanvasBlockView(
         panOffsetX = cx - (cx - panOffsetX) * (next / prev)
         panOffsetY = cy - (cy - panOffsetY) * (next / prev)
         zoomScale = next
+        clampPan()
         lastReportedZoomPct = (zoomScale * 100f).roundToInt()
         notifyZoomOnlyUpdated()
         syncOnyxRawDrawingState()
@@ -2048,7 +2109,7 @@ class WriteCanvasBlockView(
         if (isZoomedMode && oldw == 0 && w > 0) {
             zoomFitWidth()
         }
-        onyxRawSession?.updateLimitRect(this)
+        refreshOnyxLimit()
         syncOnyxRawDrawingState()
     }
 
@@ -2192,6 +2253,7 @@ class WriteCanvasBlockView(
                         if (isPanningGesture) {
                             panOffsetX += (avgX - panLastTouchX)
                             panOffsetY += (avgY - panLastTouchY)
+                            clampPan()
                             invalidate()
                         } else {
                             OnyxEInkBridge.enterFastPanMode(this)
@@ -2330,6 +2392,7 @@ class WriteCanvasBlockView(
                     if (isPanningGesture) {
                         panOffsetX += (touchX - panLastTouchX)
                         panOffsetY += (touchY - panLastTouchY)
+                        clampPan()
                         panLastTouchX = touchX
                         panLastTouchY = touchY
                         invalidateThrottled()
@@ -3299,6 +3362,8 @@ class WriteCanvasBlockView(
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        // Compose scrolling/layout moves this view without resizing it; track its visible region per frame.
+        if (OnyxEInkBridge.isEInkDevice) viewTreeObserver.addOnPreDrawListener(onyxLimitPreDraw)
         synchronized(nativeLock) {
             if (nativeHandle == 0L && WriteNativeBridge.isNativeLoaded) {
                 nativeHandle = WriteNativeBridge.nativeCreateSession(
@@ -3332,6 +3397,8 @@ class WriteCanvasBlockView(
     }
 
     override fun onDetachedFromWindow() {
+        if (viewTreeObserver.isAlive) viewTreeObserver.removeOnPreDrawListener(onyxLimitPreDraw)
+        lastOnyxLimitKey = null
         removeCallbacks(throttledInvalidateRunnable)
         invalidateThrottlePending = false
         onyxDisarmedForEraserButton = false
