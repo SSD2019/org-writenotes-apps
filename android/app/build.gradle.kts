@@ -10,20 +10,20 @@ android {
 
     defaultConfig {
         applicationId = "com.orgwritenotes"
-        minSdk = 26
+        minSdk = 24
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
 
         ndk {
-            abiFilters += listOf("arm64-v8a")
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
 
         externalNativeBuild {
             cmake {
                 cFlags += "-O3 -DNDEBUG -ffast-math -fno-math-errno"
                 cppFlags += "-std=c++17 -O3 -DNDEBUG -ffast-math -fno-math-errno"
-                abiFilters += listOf("arm64-v8a")
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a")
             }
         }
     }
@@ -57,8 +57,12 @@ android {
     }
 
     packaging {
-        // Onyx SDK and mmkv each bundle libc++_shared.so
-        jniLibs.pickFirsts += "**/libc++_shared.so"
+        jniLibs {
+            // Exclude linker script text files packaged as .so
+            excludes += "**/libc++.so"
+            // Onyx SDK and mmkv each bundle libc++_shared.so
+            pickFirsts += "**/libc++_shared.so"
+        }
     }
 
     kotlinOptions {

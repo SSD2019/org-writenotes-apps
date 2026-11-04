@@ -24,7 +24,7 @@ echo "=== [2/2] Installing APK onto connected Android tablet ==="
 ADB="$SDK_DIR/platform-tools/adb"
 "$ADB" devices -l
 if "$ADB" get-state >/dev/null 2>&1; then
-    "$ADB" install -r "$APK_PATH"
+    "$ADB" install -r -d "$APK_PATH"
     "$ADB" reverse tcp:9876 tcp:9876
     "$ADB" shell am start -n com.orgwritenotes/.MainActivity
     echo "SUCCESS: Installed and launched Org-WriteNotes on device, with adb reverse tcp:9876 tcp:9876 active!"

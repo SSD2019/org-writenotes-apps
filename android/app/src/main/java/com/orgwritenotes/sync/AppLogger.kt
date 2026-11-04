@@ -20,20 +20,32 @@ data class LogEntry(
 }
 
 object AppLogger {
+    const val ENABLED = false
     private const val MAX_LOGS = 200
     private val buffer = ConcurrentLinkedDeque<LogEntry>()
     private val _logsFlow = MutableStateFlow<List<LogEntry>>(emptyList())
     val logsFlow: StateFlow<List<LogEntry>> = _logsFlow
 
-    fun d(tag: String, message: String) = log("D", tag, message)
-    fun i(tag: String, message: String) = log("I", tag, message)
-    fun w(tag: String, message: String) = log("W", tag, message)
+    fun d(tag: String, message: String) {
+        if (!ENABLED) return
+        log("D", tag, message)
+    }
+    fun i(tag: String, message: String) {
+        if (!ENABLED) return
+        log("I", tag, message)
+    }
+    fun w(tag: String, message: String) {
+        if (!ENABLED) return
+        log("W", tag, message)
+    }
     fun e(tag: String, message: String, throwable: Throwable? = null) {
+        if (!ENABLED) return
         val msg = if (throwable != null) "$message: ${throwable.stackTraceToString()}" else message
         log("E", tag, msg)
     }
 
     private fun log(level: String, tag: String, message: String) {
+        if (!ENABLED) return
         android.util.Log.println(
             when (level) {
                 "D" -> android.util.Log.DEBUG

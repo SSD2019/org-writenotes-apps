@@ -1505,7 +1505,7 @@ class EmacsSyncClient(
             val id = msg.getInt("id")
             val errObj = msg.optJSONObject("error")
             val errMsg = errObj?.optString("message") ?: "RPC Error"
-            android.util.Log.e("EmacsSyncClient", "RPC id $id returned error: $errMsg")
+            AppLogger.e("EmacsSyncClient", "RPC id $id returned error: $errMsg")
             pendingCallbacks.remove(id)
             pendingErrorCallbacks.remove(id)?.invoke(errMsg)
             val failedMethod = pendingMethods.remove(id)
