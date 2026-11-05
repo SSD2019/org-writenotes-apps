@@ -83,6 +83,8 @@ dependencies {
     implementation("com.onyx.android.sdk:onyxsdk-device:1.2.30")
     implementation("com.onyx.android.sdk:onyxsdk-pen:1.4.11")
     implementation("org.lsposed.hiddenapibypass:hiddenapibypass:4.3")
+    // QR scanner for the Emacs pairing payload (camera + ZXing decoder).
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     testImplementation("junit:junit:4.13.2")
 }
 

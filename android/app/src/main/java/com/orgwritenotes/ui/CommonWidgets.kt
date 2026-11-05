@@ -1,5 +1,11 @@
 package com.orgwritenotes.ui
 
+import android.Manifest
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import androidx.compose.ui.unit.max
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -122,6 +128,25 @@ internal fun PairingModalDialog(
     val isEInk = OnyxEInkBridge.isEInkDevice
     var wsUrlOrQr by remember { mutableStateOf("ws://192.168.1.42:9876") }
     var token by remember { mutableStateOf("") }
+    val ctx = LocalContext.current
+
+    val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+        result.contents?.let { wsUrlOrQr = it }
+    }
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            scanLauncher.launch(
+                ScanOptions()
+                    .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                    .setPrompt("Scan the QR code shown by M-x org-writenotes-pair-qr")
+                    .setBeepEnabled(false)
+            )
+        } else {
+            Toast.makeText(ctx, "Camera permission is needed to scan", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -169,6 +194,12 @@ internal fun PairingModalDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
+                Button(
+                    onClick = { cameraPermissionLauncher.launch(Manifest.permission.CAMERA) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Scan Pairing QR Code")
+                }
                 OutlinedTextField(
                     value = token,
                     onValueChange = { token = it },
