@@ -1,0 +1,445 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 50;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		EF5D42DA240F4B8500BA10F4 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EF5D42CF240F4B8400BA10F4 /* Foundation.framework */; };
+		EF5D42DB240F4B8500BA10F4 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EF5D42D0240F4B8400BA10F4 /* Metal.framework */; };
+		EF5D42DC240F4B8500BA10F4 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EF5D42D1240F4B8500BA10F4 /* QuartzCore.framework */; };
+		EF5D42DD240F4B8500BA10F4 /* CoreAudio.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EF5D42D2240F4B8500BA10F4 /* CoreAudio.framework */; };
+		EF5D42DE240F4B8500BA10F4 /* CoreMotion.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EF5D42D3240F4B8500BA10F4 /* CoreMotion.framework */; };
+		EF5D42DF240F4B8500BA10F4 /* AudioToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EF5D42D4240F4B8500BA10F4 /* AudioToolbox.framework */; };
+		EF5D42E0240F4B8500BA10F4 /* GameController.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EF5D42D5240F4B8500BA10F4 /* GameController.framework */; };
+		EF5D42E1240F4B8500BA10F4 /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EF5D42D6240F4B8500BA10F4 /* CoreGraphics.framework */; };
+		EF5D42E2240F4B8500BA10F4 /* OpenGLES.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EF5D42D7240F4B8500BA10F4 /* OpenGLES.framework */; };
+		EF5D42E3240F4B8500BA10F4 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EF5D42D8240F4B8500BA10F4 /* UIKit.framework */; };
+		EF5D42E4240F4B8500BA10F4 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EF5D42D9240F4B8500BA10F4 /* AVFoundation.framework */; };
+		EF5D42E6240F4BD100BA10F4 /* libSDL2.a in Frameworks */ = {isa = PBXBuildFile; fileRef = EF5D42E5240F4BD100BA10F4 /* libSDL2.a */; };
+		EF5D42E8240F4BEF00BA10F4 /* libWrite.a in Frameworks */ = {isa = PBXBuildFile; fileRef = EF5D42E7240F4BEF00BA10F4 /* libWrite.a */; };
+		EF5D42EC240F507500BA10F4 /* LaunchView.xib in Resources */ = {isa = PBXBuildFile; fileRef = EF5D42EB240F507500BA10F4 /* LaunchView.xib */; };
+		EF5D42EE240F572000BA10F4 /* dummy.cpp in Sources */ = {isa = PBXBuildFile; fileRef = EF5D42ED240F572000BA10F4 /* dummy.cpp */; };
+		EF5D42F1240F605700BA10F4 /* DroidSansFallback.ttf in Resources */ = {isa = PBXBuildFile; fileRef = EF5D42EF240F605700BA10F4 /* DroidSansFallback.ttf */; };
+		EF5D42F2240F605700BA10F4 /* SanFranciscoDisplay-Regular.otf in Resources */ = {isa = PBXBuildFile; fileRef = EF5D42F0240F605700BA10F4 /* SanFranciscoDisplay-Regular.otf */; };
+		EF5D42F4240F608100BA10F4 /* Intro.svg in Resources */ = {isa = PBXBuildFile; fileRef = EF5D42F3240F608100BA10F4 /* Intro.svg */; };
+		EF612E7123C2FB04000BB825 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = EF612E7023C2FB04000BB825 /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		EF5D42CF240F4B8400BA10F4 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
+		EF5D42D0240F4B8400BA10F4 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		EF5D42D1240F4B8500BA10F4 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
+		EF5D42D2240F4B8500BA10F4 /* CoreAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreAudio.framework; path = System/Library/Frameworks/CoreAudio.framework; sourceTree = SDKROOT; };
+		EF5D42D3240F4B8500BA10F4 /* CoreMotion.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMotion.framework; path = System/Library/Frameworks/CoreMotion.framework; sourceTree = SDKROOT; };
+		EF5D42D4240F4B8500BA10F4 /* AudioToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioToolbox.framework; path = System/Library/Frameworks/AudioToolbox.framework; sourceTree = SDKROOT; };
+		EF5D42D5240F4B8500BA10F4 /* GameController.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = GameController.framework; path = System/Library/Frameworks/GameController.framework; sourceTree = SDKROOT; };
+		EF5D42D6240F4B8500BA10F4 /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
+		EF5D42D7240F4B8500BA10F4 /* OpenGLES.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = OpenGLES.framework; path = System/Library/Frameworks/OpenGLES.framework; sourceTree = SDKROOT; };
+		EF5D42D8240F4B8500BA10F4 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
+		EF5D42D9240F4B8500BA10F4 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+		EF5D42E5240F4BD100BA10F4 /* libSDL2.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libSDL2.a; path = ../../styluslabs/SDL/Release/libSDL2.a; sourceTree = "<group>"; };
+		EF5D42E7240F4BEF00BA10F4 /* libWrite.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libWrite.a; path = ../../styluslabs/syncscribble/Release/libWrite.a; sourceTree = "<group>"; };
+		EF5D42EB240F507500BA10F4 /* LaunchView.xib */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.xib; path = LaunchView.xib; sourceTree = "<group>"; };
+		EF5D42ED240F572000BA10F4 /* dummy.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = dummy.cpp; sourceTree = "<group>"; };
+		EF5D42EF240F605700BA10F4 /* DroidSansFallback.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = DroidSansFallback.ttf; path = ../../styluslabs/scribbleres/fonts/DroidSansFallback.ttf; sourceTree = "<group>"; };
+		EF5D42F0240F605700BA10F4 /* SanFranciscoDisplay-Regular.otf */ = {isa = PBXFileReference; lastKnownFileType = file; name = "SanFranciscoDisplay-Regular.otf"; path = "../../styluslabs/scribbleres/fonts/SanFranciscoDisplay-Regular.otf"; sourceTree = "<group>"; };
+		EF5D42F3240F608100BA10F4 /* Intro.svg */ = {isa = PBXFileReference; lastKnownFileType = text; name = Intro.svg; path = ../../styluslabs/scribbleres/Intro.svg; sourceTree = "<group>"; };
+		EF612E6123C2FB01000BB825 /* Write.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Write.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		EF612E7023C2FB04000BB825 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		EF612E7323C2FB04000BB825 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
+		EF612E7523C2FB04000BB825 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		EF612E5E23C2FB01000BB825 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EF5D42E8240F4BEF00BA10F4 /* libWrite.a in Frameworks */,
+				EF5D42E6240F4BD100BA10F4 /* libSDL2.a in Frameworks */,
+				EF5D42DA240F4B8500BA10F4 /* Foundation.framework in Frameworks */,
+				EF5D42DB240F4B8500BA10F4 /* Metal.framework in Frameworks */,
+				EF5D42DC240F4B8500BA10F4 /* QuartzCore.framework in Frameworks */,
+				EF5D42DD240F4B8500BA10F4 /* CoreAudio.framework in Frameworks */,
+				EF5D42DE240F4B8500BA10F4 /* CoreMotion.framework in Frameworks */,
+				EF5D42DF240F4B8500BA10F4 /* AudioToolbox.framework in Frameworks */,
+				EF5D42E0240F4B8500BA10F4 /* GameController.framework in Frameworks */,
+				EF5D42E1240F4B8500BA10F4 /* CoreGraphics.framework in Frameworks */,
+				EF5D42E2240F4B8500BA10F4 /* OpenGLES.framework in Frameworks */,
+				EF5D42E3240F4B8500BA10F4 /* UIKit.framework in Frameworks */,
+				EF5D42E4240F4B8500BA10F4 /* AVFoundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		EF5D42CE240F4B8400BA10F4 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				EF5D42E7240F4BEF00BA10F4 /* libWrite.a */,
+				EF5D42E5240F4BD100BA10F4 /* libSDL2.a */,
+				EF5D42D4240F4B8500BA10F4 /* AudioToolbox.framework */,
+				EF5D42D9240F4B8500BA10F4 /* AVFoundation.framework */,
+				EF5D42D2240F4B8500BA10F4 /* CoreAudio.framework */,
+				EF5D42D6240F4B8500BA10F4 /* CoreGraphics.framework */,
+				EF5D42D3240F4B8500BA10F4 /* CoreMotion.framework */,
+				EF5D42CF240F4B8400BA10F4 /* Foundation.framework */,
+				EF5D42D5240F4B8500BA10F4 /* GameController.framework */,
+				EF5D42D0240F4B8400BA10F4 /* Metal.framework */,
+				EF5D42D7240F4B8500BA10F4 /* OpenGLES.framework */,
+				EF5D42D1240F4B8500BA10F4 /* QuartzCore.framework */,
+				EF5D42D8240F4B8500BA10F4 /* UIKit.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		EF612E5823C2FB01000BB825 = {
+			isa = PBXGroup;
+			children = (
+				EF5D42F3240F608100BA10F4 /* Intro.svg */,
+				EF5D42EF240F605700BA10F4 /* DroidSansFallback.ttf */,
+				EF5D42F0240F605700BA10F4 /* SanFranciscoDisplay-Regular.otf */,
+				EF612E6323C2FB01000BB825 /* Write */,
+				EF612E6223C2FB01000BB825 /* Products */,
+				EF5D42CE240F4B8400BA10F4 /* Frameworks */,
+			);
+			sourceTree = "<group>";
+		};
+		EF612E6223C2FB01000BB825 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				EF612E6123C2FB01000BB825 /* Write.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		EF612E6323C2FB01000BB825 /* Write */ = {
+			isa = PBXGroup;
+			children = (
+				EF612E7023C2FB04000BB825 /* Assets.xcassets */,
+				EF612E7223C2FB04000BB825 /* LaunchScreen.storyboard */,
+				EF5D42EB240F507500BA10F4 /* LaunchView.xib */,
+				EF5D42ED240F572000BA10F4 /* dummy.cpp */,
+				EF612E7523C2FB04000BB825 /* Info.plist */,
+			);
+			path = Write;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		EF612E6023C2FB01000BB825 /* Write */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = EF612E7A23C2FB04000BB825 /* Build configuration list for PBXNativeTarget "Write" */;
+			buildPhases = (
+				EF5D42CD240F4A5000BA10F4 /* ShellScript */,
+				EF612E5D23C2FB01000BB825 /* Sources */,
+				EF612E5E23C2FB01000BB825 /* Frameworks */,
+				EF612E5F23C2FB01000BB825 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Write;
+			productName = Write;
+			productReference = EF612E6123C2FB01000BB825 /* Write.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		EF612E5923C2FB01000BB825 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastUpgradeCheck = 1130;
+				ORGANIZATIONNAME = mwhite;
+				TargetAttributes = {
+					EF612E6023C2FB01000BB825 = {
+						CreatedOnToolsVersion = 11.3;
+					};
+				};
+			};
+			buildConfigurationList = EF612E5C23C2FB01000BB825 /* Build configuration list for PBXProject "WriteIAP" */;
+			compatibilityVersion = "Xcode 9.3";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = EF612E5823C2FB01000BB825;
+			productRefGroup = EF612E6223C2FB01000BB825 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				EF612E6023C2FB01000BB825 /* Write */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		EF612E5F23C2FB01000BB825 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EF5D42F4240F608100BA10F4 /* Intro.svg in Resources */,
+				EF5D42F1240F605700BA10F4 /* DroidSansFallback.ttf in Resources */,
+				EF5D42F2240F605700BA10F4 /* SanFranciscoDisplay-Regular.otf in Resources */,
+				EF612E7123C2FB04000BB825 /* Assets.xcassets in Resources */,
+				EF5D42EC240F507500BA10F4 /* LaunchView.xib in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		EF5D42CD240F4A5000BA10F4 /* ShellScript */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Type a script or drag a script file from your workspace to insert its path.\n(cd /Users/mwhite/styluslabs/syncscribble && make DEBUG=0 IAP=1 lib)\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		EF612E5D23C2FB01000BB825 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EF5D42EE240F572000BA10F4 /* dummy.cpp in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXVariantGroup section */
+		EF612E7223C2FB04000BB825 /* LaunchScreen.storyboard */ = {
+			isa = PBXVariantGroup;
+			children = (
+				EF612E7323C2FB04000BB825 /* Base */,
+			);
+			name = LaunchScreen.storyboard;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
+
+/* Begin XCBuildConfiguration section */
+		EF612E7823C2FB04000BB825 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 13.2;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+			};
+			name = Debug;
+		};
+		EF612E7923C2FB04000BB825 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 13.2;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		EF612E7B23C2FB04000BB825 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1.6.1;
+				DEVELOPMENT_TEAM = 8U8646Y4MM;
+				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = 8U8646Y4MM;
+				ENABLE_BITCODE = NO;
+				INFOPLIST_FILE = Write/Info.plist;
+				INFOPLIST_OUTPUT_FORMAT = XML;
+				IPHONEOS_DEPLOYMENT_TARGET = 11.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					/Users/mwhite/styluslabs/syncscribble/IAPRelease,
+					/Users/mwhite/styluslabs/SDL/Release,
+				);
+				MARKETING_VERSION = 1.6.1;
+				OTHER_LDFLAGS = (
+					"-framework",
+					StoreKit,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.styluslabs.write3a;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "mwhite iOS Dev 2023";
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "mwhite iOS Dev 2024";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		EF612E7C23C2FB04000BB825 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Distribution";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1.6.1;
+				DEVELOPMENT_TEAM = 8U8646Y4MM;
+				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = 8U8646Y4MM;
+				ENABLE_BITCODE = NO;
+				INFOPLIST_FILE = Write/Info.plist;
+				INFOPLIST_OUTPUT_FORMAT = XML;
+				IPHONEOS_DEPLOYMENT_TARGET = 11.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					/Users/mwhite/styluslabs/syncscribble/IAPRelease,
+					/Users/mwhite/styluslabs/SDL/Release,
+				);
+				MARKETING_VERSION = 1.6.1;
+				OTHER_LDFLAGS = (
+					"-framework",
+					StoreKit,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.styluslabs.write3a;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "Stylus Labs App Store 2023";
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Stylus Labs App Store 2024";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		EF612E5C23C2FB01000BB825 /* Build configuration list for PBXProject "WriteIAP" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				EF612E7823C2FB04000BB825 /* Debug */,
+				EF612E7923C2FB04000BB825 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		EF612E7A23C2FB04000BB825 /* Build configuration list for PBXNativeTarget "Write" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				EF612E7B23C2FB04000BB825 /* Debug */,
+				EF612E7C23C2FB04000BB825 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = EF612E5923C2FB01000BB825 /* Project object */;
+}
