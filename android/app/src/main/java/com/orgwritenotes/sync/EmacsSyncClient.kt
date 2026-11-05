@@ -3,7 +3,6 @@ package com.orgwritenotes.sync
 import android.content.Context
 import android.os.Build
 import android.util.Base64
-import com.orgwritenotes.ink.HandwritingOcrEngine
 import com.orgwritenotes.model.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -981,16 +980,14 @@ class EmacsSyncClient(
         }
     }
 
-    /** OCR-indexes and sends a full `.svgz` commit; heavy (decompress + recognise), so call off the UI thread. */
+    /** Sends a full `.svgz` commit. Handwriting recognition happens later on the Emacs side, once the sketch has been idle. */
     private fun commitSvgz(nodeId: String, fileName: String, canvasWidth: Int, canvasHeight: Int, svgzBase64: String) {
-        val ocrText = HandwritingOcrEngine.extractTextFromSvgzBase64(svgzBase64)
         val commitParams = JSONObject().apply {
             put("nodeId", nodeId)
             put("fileName", fileName)
             put("width", canvasWidth)
             put("height", canvasHeight)
             put("svgzBase64", svgzBase64)
-            if (ocrText.isNotBlank()) put("ocrText", ocrText)
         }
         sendInkCommit(commitParams)
     }
