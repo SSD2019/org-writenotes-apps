@@ -31,3 +31,9 @@ if "$ADB" get-state >/dev/null 2>&1; then
 else
     echo "WARNING: No online ADB device currently detected. Connect tablet via USB and re-run."
 fi
+
+echo "=== [3/3] Removing intermediate build files (keeping outputs/apk) ==="
+BUILD_DIR="$ANDROID_DIR/app/build"
+find "$BUILD_DIR" -mindepth 1 -maxdepth 1 ! -name outputs -exec rm -rf {} +
+find "$BUILD_DIR/outputs" -mindepth 1 -maxdepth 1 ! -name apk -exec rm -rf {} +
+du -sh "$BUILD_DIR"
