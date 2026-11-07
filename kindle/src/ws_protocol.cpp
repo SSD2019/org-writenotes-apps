@@ -10,6 +10,8 @@
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <arpa/inet.h>
+#include <cerrno>
+#include <fcntl.h>
 #include <netdb.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -141,6 +143,42 @@ std::string buildOutlineListJson(int id) {
     return oss.str();
 }
 
+std::string buildNodeListJson(int id, const std::string& filter, const std::string& query) {
+    std::ostringstream oss;
+    oss << "{\"jsonrpc\":\"2.0\",\"id\":" << id
+        << ",\"method\":\"node.list\",\"params\":{"
+        << "\"filter\":\"" << jsonEscape(filter) << "\","
+        << "\"query\":\"" << jsonEscape(query) << "\"}}";
+    return oss.str();
+}
+
+std::string buildNodeGetJson(int id, const std::string& nodeId) {
+    std::ostringstream oss;
+    oss << "{\"jsonrpc\":\"2.0\",\"id\":" << id
+        << ",\"method\":\"node.get\",\"params\":{"
+        << "\"nodeId\":\"" << jsonEscape(nodeId) << "\"}}";
+    return oss.str();
+}
+
+std::string buildInsertInkBlockJson(
+    int id,
+    const std::string& nodeId,
+    int width,
+    int height,
+    int xRuling,
+    int yRuling
+) {
+    std::ostringstream oss;
+    oss << "{\"jsonrpc\":\"2.0\",\"id\":" << id
+        << ",\"method\":\"node.insertInkBlock\",\"params\":{"
+        << "\"nodeId\":\"" << jsonEscape(nodeId) << "\","
+        << "\"width\":" << width << ","
+        << "\"height\":" << height << ","
+        << "\"xRuling\":" << xRuling << ","
+        << "\"yRuling\":" << yRuling << "}}";
+    return oss.str();
+}
+
 std::string buildAgendaListJson(int id, const std::string& span) {
     std::ostringstream oss;
     oss << "{\"jsonrpc\":\"2.0\",\"id\":" << id
@@ -165,10 +203,15 @@ std::string buildInkCommitJson(int id, const InkCommitPayload& payload) {
         << "\"nodeId\":\"" << jsonEscape(payload.nodeId) << "\","
         << "\"fileName\":\"" << jsonEscape(payload.fileName) << "\","
         << "\"width\":" << payload.width << ","
-        << "\"height\":" << payload.height << ","
-        << "\"baseEtag\":\"" << jsonEscape(payload.baseEtag) << "\","
-        << "\"svgzBase64\":\"" << jsonEscape(payload.svgzBase64) << "\","
-        << "\"ocrText\":\"" << jsonEscape(payload.ocrText) << "\"}}";
+        << "\"height\":" << payload.height << ",";
+    if (!payload.baseEtag.empty()) {
+        oss << "\"baseEtag\":\"" << jsonEscape(payload.baseEtag) << "\",";
+    }
+    oss << "\"svgzBase64\":\"" << jsonEscape(payload.svgzBase64) << "\"";
+    if (!payload.ocrText.empty()) {
+        oss << ",\"ocrText\":\"" << jsonEscape(payload.ocrText) << "\"";
+    }
+    oss << "}}";
     return oss.str();
 }
 
@@ -231,6 +274,163 @@ int extractJsonIntField(const std::string& json, const std::string& key, int def
     return defaultVal;
 }
 
+std::string extractJsonObjectField(const std::string& json, const std::string& key) {
+    std::string needle = "\"" + key + "\"";
+    size_t pos = json.find(needle);
+    while (pos != std::string::npos) {
+        size_t colon = json.find(':', pos + needle.size());
+        if (colon == std::string::npos) return "";
+        size_t p = colon + 1;
+        while (p < json.size() && std::isspace(static_cast<unsigned char>(json[p]))) ++p;
+        if (p < json.size() && json[p] == '{') {
+            size_t start = p;
+            int depth = 0;
+            bool inStr = false;
+            while (p < json.size()) {
+                char c = json[p];
+                if (inStr) {
+                    if (c == '\\' && p + 1 < json.size()) {
+                        p += 2;
+                        continue;
+                    } else if (c == '"') {
+                        inStr = false;
+                    }
+                } else {
+                    if (c == '"') {
+                        inStr = true;
+                    } else if (c == '{') {
+                        ++depth;
+                    } else if (c == '}') {
+                        --depth;
+                        if (depth == 0) {
+                            return json.substr(start, p - start + 1);
+                        }
+                    }
+                }
+                ++p;
+            }
+            return "";
+        }
+        pos = json.find(needle, pos + needle.size());
+    }
+    return "";
+}
+
+std::vector<std::string> extractJsonArrayObjects(const std::string& json, const std::string& key) {
+    std::vector<std::string> items;
+    std::string needle = "\"" + key + "\"";
+    size_t pos = json.find(needle);
+    while (pos != std::string::npos) {
+        size_t colon = json.find(':', pos + needle.size());
+        if (colon == std::string::npos) return items;
+        size_t p = colon + 1;
+        while (p < json.size() && std::isspace(static_cast<unsigned char>(json[p]))) ++p;
+        if (p < json.size() && json[p] == '[') {
+            ++p;
+            int arrDepth = 1;
+            int objDepth = 0;
+            size_t objStart = 0;
+            bool inStr = false;
+            while (p < json.size() && arrDepth > 0) {
+                char c = json[p];
+                if (inStr) {
+                    if (c == '\\' && p + 1 < json.size()) {
+                        p += 2;
+                        continue;
+                    } else if (c == '"') {
+                        inStr = false;
+                    }
+                } else {
+                    if (c == '"') {
+                        inStr = true;
+                    } else if (c == '[' && objDepth == 0) {
+                        ++arrDepth;
+                    } else if (c == ']' && objDepth == 0) {
+                        --arrDepth;
+                        if (arrDepth == 0) break;
+                    } else if (c == '{') {
+                        if (objDepth == 0) objStart = p;
+                        ++objDepth;
+                    } else if (c == '}') {
+                        --objDepth;
+                        if (objDepth == 0) {
+                            items.push_back(json.substr(objStart, p - objStart + 1));
+                        }
+                    }
+                }
+                ++p;
+            }
+            return items;
+        }
+        pos = json.find(needle, pos + needle.size());
+    }
+    return items;
+}
+
+bool parseNodeSnapshotJson(const std::string& snapshotObjJson, OrgNodeSnapshotData* outSnapshot) {
+    if (!outSnapshot || snapshotObjJson.empty()) return false;
+    std::string nodeId = extractJsonStringField(snapshotObjJson, "nodeId");
+    if (nodeId.empty() || nodeId == "null") return false;
+
+    outSnapshot->nodeId   = nodeId;
+    outSnapshot->etag     = extractJsonStringField(snapshotObjJson, "etag");
+    outSnapshot->filePath = extractJsonStringField(snapshotObjJson, "filePath");
+
+    std::string hdr = extractJsonObjectField(snapshotObjJson, "header");
+    if (!hdr.empty()) {
+        outSnapshot->title       = extractJsonStringField(hdr, "title");
+        outSnapshot->todoKeyword = extractJsonStringField(hdr, "todoKeyword");
+        if (outSnapshot->todoKeyword == "null") outSnapshot->todoKeyword.clear();
+        outSnapshot->level       = extractJsonIntField(hdr, "level", 1);
+    }
+    if (outSnapshot->title.empty()) {
+        outSnapshot->title = "Untitled";
+    }
+
+    outSnapshot->inkBlocks.clear();
+    auto blockObjs = extractJsonArrayObjects(snapshotObjJson, "blocks");
+    for (const auto& blk : blockObjs) {
+        if (extractJsonStringField(blk, "type") != "ink_canvas") continue;
+        InkBlockInfo info;
+        info.blockId    = extractJsonStringField(blk, "blockId");
+        info.fileName   = extractJsonStringField(blk, "fileName");
+        info.linkText   = extractJsonStringField(blk, "linkText");
+        info.etag       = extractJsonStringField(blk, "etag");
+        if (info.etag == "null") info.etag.clear();
+        info.width      = extractJsonIntField(blk, "width", 1200);
+        info.height     = extractJsonIntField(blk, "height", 600);
+        info.xRuling    = extractJsonIntField(blk, "xRuling", 0);
+        info.yRuling    = extractJsonIntField(blk, "yRuling", 48);
+        info.svgzBase64 = extractJsonStringField(blk, "svgzBase64");
+        if (info.svgzBase64 == "null") info.svgzBase64.clear();
+        if (!info.fileName.empty()) {
+            outSnapshot->inkBlocks.push_back(std::move(info));
+        }
+    }
+    return true;
+}
+
+std::vector<OrgNodeSummary> parseNodeSummariesJson(const std::string& responseJson) {
+    std::vector<OrgNodeSummary> list;
+    auto nodeObjs = extractJsonArrayObjects(responseJson, "nodes");
+    for (const auto& obj : nodeObjs) {
+        OrgNodeSummary s;
+        s.nodeId      = extractJsonStringField(obj, "nodeId");
+        s.filePath    = extractJsonStringField(obj, "filePath");
+        s.title       = extractJsonStringField(obj, "title");
+        s.todoKeyword = extractJsonStringField(obj, "todoKeyword");
+        if (s.todoKeyword == "null") s.todoKeyword.clear();
+        s.scheduled   = extractJsonStringField(obj, "scheduled");
+        if (s.scheduled == "null") s.scheduled.clear();
+        s.level       = extractJsonIntField(obj, "level", 1);
+        s.sketchCount = extractJsonIntField(obj, "sketchCount", 0);
+        if (!s.nodeId.empty()) {
+            list.push_back(std::move(s));
+        }
+    }
+    return list;
+}
+
 bool parseGoldenFixtureFile(const std::string& filePath, GoldenFixtureData* outFixture) {
     if (!outFixture) return false;
     std::string content = readFileToString(filePath);
@@ -283,11 +483,16 @@ void WriteNotesSyncClient::setEndpoint(
 bool WriteNotesSyncClient::loadConfigFile(const std::string& configJsonPath) {
     std::string content = readFileToString(configJsonPath);
     if (content.empty()) return false;
-    std::string h = extractJsonStringField(content, "host");
-    int p         = extractJsonIntField(content, "port", 9876);
+    std::string h    = extractJsonStringField(content, "host");
+    std::string wh   = extractJsonStringField(content, "wifiHost");
+    if (wh.empty()) {
+        wh = extractJsonStringField(content, "fallbackHost");
+    }
+    int p            = extractJsonIntField(content, "port", 9876);
     std::string path = extractJsonStringField(content, "path");
     std::string tok  = extractJsonStringField(content, "token");
     if (!h.empty()) m_host = h;
+    if (!wh.empty()) m_wifiHost = wh;
     if (p > 0) m_port = p;
     if (!path.empty()) m_path = path;
     if (!tok.empty()) m_token = tok;
@@ -302,33 +507,85 @@ void WriteNotesSyncClient::disconnect() {
 #endif
     m_sockFd        = -1;
     m_authenticated = false;
+    m_pendingNotifications.clear();
 }
 
 bool WriteNotesSyncClient::connectAndHandshake() {
     disconnect();
 #if defined(__linux__) || defined(__APPLE__)
-    struct addrinfo hints{};
-    hints.ai_family   = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    struct addrinfo* res = nullptr;
-    std::string portStr = std::to_string(m_port);
-    if (getaddrinfo(m_host.c_str(), portStr.c_str(), &hints, &res) != 0 || !res) {
-        return false;
+    std::vector<std::string> candidateHosts;
+    auto addHosts = [&](const std::string& raw) {
+        std::stringstream ss(raw);
+        std::string item;
+        while (std::getline(ss, item, ',')) {
+            size_t start = item.find_first_not_of(" \t\r\n");
+            size_t end   = item.find_last_not_of(" \t\r\n");
+            if (start == std::string::npos) continue;
+            std::string trimmed = item.substr(start, end - start + 1);
+            if (!trimmed.empty() &&
+                std::find(candidateHosts.begin(), candidateHosts.end(), trimmed) == candidateHosts.end()) {
+                candidateHosts.push_back(trimmed);
+            }
+        }
+    };
+    addHosts(m_host);
+    addHosts(m_wifiHost);
+    if (candidateHosts.empty()) {
+        candidateHosts.push_back("127.0.0.1");
     }
 
     int fd = -1;
-    for (struct addrinfo* rp = res; rp != nullptr; rp = rp->ai_next) {
-        fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (fd < 0) continue;
-        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) break;
-        close(fd);
-        fd = -1;
+    std::string connectedHost = m_host;
+    std::string portStr = std::to_string(m_port);
+
+    for (const auto& candidate : candidateHosts) {
+        struct addrinfo hints{};
+        hints.ai_family   = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+
+        struct addrinfo* res = nullptr;
+        if (getaddrinfo(candidate.c_str(), portStr.c_str(), &hints, &res) != 0 || !res) {
+            continue;
+        }
+
+        for (struct addrinfo* rp = res; rp != nullptr; rp = rp->ai_next) {
+            fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+            if (fd < 0) continue;
+            int flags = fcntl(fd, F_GETFL, 0);
+            if (flags >= 0) {
+                (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+            }
+            int rc = connect(fd, rp->ai_addr, rp->ai_addrlen);
+            bool connected = (rc == 0);
+            if (!connected && errno == EINPROGRESS) {
+                struct pollfd pfd{};
+                pfd.fd     = fd;
+                pfd.events = POLLOUT;
+                if (poll(&pfd, 1, 500) > 0 && (pfd.revents & POLLOUT)) {
+                    int soErr = 0;
+                    socklen_t errLen = sizeof(soErr);
+                    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soErr, &errLen) == 0 && soErr == 0) {
+                        connected = true;
+                    }
+                }
+            }
+            if (flags >= 0) {
+                (void)fcntl(fd, F_SETFL, flags);
+            }
+            if (connected) {
+                connectedHost = candidate;
+                break;
+            }
+            close(fd);
+            fd = -1;
+        }
+        freeaddrinfo(res);
+        if (fd >= 0) break;
     }
-    freeaddrinfo(res);
     if (fd < 0) return false;
 
     m_sockFd = fd;
+    m_host   = connectedHost;
 
     // RFC 6455 HTTP Upgrade Handshake
     std::ostringstream req;
@@ -351,17 +608,17 @@ bool WriteNotesSyncClient::connectAndHandshake() {
         return false;
     }
 
-    std::string hello = buildSessionHelloJson(m_nextRpcId++, "Kindle-Scribe", "0.2.0", 2, m_token);
-    if (!sendWebSocketTextFrame(hello)) {
+    int helloId = m_nextRpcId++;
+    std::string hello = buildSessionHelloJson(helloId, "Kindle-Scribe", "0.2.0", 2, m_token);
+    std::string reply;
+    if (!sendRpcRequest(helloId, hello, &reply, 3000) || reply.find("\"error\"") != std::string::npos) {
         disconnect();
         return false;
     }
 
-    std::string reply;
-    if (!receiveWebSocketTextFrame(&reply, 3000) || reply.find("\"error\"") != std::string::npos) {
-        disconnect();
-        return false;
-    }
+    std::string activeId = extractJsonStringField(reply, "activeNodeId");
+    if (activeId == "null") activeId.clear();
+    m_serverActiveNodeId = activeId;
 
     m_authenticated = true;
     replayOfflineQueue();
@@ -417,50 +674,176 @@ bool WriteNotesSyncClient::sendWebSocketTextFrame(const std::string& text) {
 bool WriteNotesSyncClient::receiveWebSocketTextFrame(std::string* outText, int timeoutMs) {
 #if defined(__linux__) || defined(__APPLE__)
     if (m_sockFd < 0 || !outText) return false;
-    struct pollfd pfd{};
-    pfd.fd     = m_sockFd;
-    pfd.events = POLLIN;
-    if (poll(&pfd, 1, timeoutMs) <= 0) return false;
+    while (m_sockFd >= 0) {
+        struct pollfd pfd{};
+        pfd.fd     = m_sockFd;
+        pfd.events = POLLIN;
+        if (poll(&pfd, 1, timeoutMs) <= 0) return false;
 
-    uint8_t hdr[2] = {0};
-    if (recv(m_sockFd, hdr, 2, MSG_WAITALL) != 2) return false;
+        uint8_t hdr[2] = {0};
+        if (recv(m_sockFd, hdr, 2, MSG_WAITALL) != 2) return false;
 
-    bool masked = (hdr[1] & 0x80) != 0;
-    uint64_t payloadLen = hdr[1] & 0x7F;
-    if (payloadLen == 126) {
-        uint8_t ext[2] = {0};
-        if (recv(m_sockFd, ext, 2, MSG_WAITALL) != 2) return false;
-        payloadLen = (static_cast<uint64_t>(ext[0]) << 8) | ext[1];
-    } else if (payloadLen == 127) {
-        uint8_t ext[8] = {0};
-        if (recv(m_sockFd, ext, 8, MSG_WAITALL) != 8) return false;
-        payloadLen = 0;
-        for (int i = 0; i < 8; ++i) payloadLen = (payloadLen << 8) | ext[i];
-    }
-
-    uint8_t maskKey[4] = {0};
-    if (masked && recv(m_sockFd, maskKey, 4, MSG_WAITALL) != 4) return false;
-
-    if (payloadLen > 32 * 1024 * 1024) return false;
-    std::string buf(static_cast<size_t>(payloadLen), '\0');
-    if (payloadLen > 0) {
-        if (recv(m_sockFd, buf.data(), static_cast<size_t>(payloadLen), MSG_WAITALL) !=
-            static_cast<ssize_t>(payloadLen)) {
-            return false;
+        uint8_t opcode = hdr[0] & 0x0F;
+        bool masked = (hdr[1] & 0x80) != 0;
+        uint64_t payloadLen = hdr[1] & 0x7F;
+        if (payloadLen == 126) {
+            uint8_t ext[2] = {0};
+            if (recv(m_sockFd, ext, 2, MSG_WAITALL) != 2) return false;
+            payloadLen = (static_cast<uint64_t>(ext[0]) << 8) | ext[1];
+        } else if (payloadLen == 127) {
+            uint8_t ext[8] = {0};
+            if (recv(m_sockFd, ext, 8, MSG_WAITALL) != 8) return false;
+            payloadLen = 0;
+            for (int i = 0; i < 8; ++i) payloadLen = (payloadLen << 8) | ext[i];
         }
-        if (masked) {
-            for (size_t i = 0; i < buf.size(); ++i) {
-                buf[i] = static_cast<char>(static_cast<uint8_t>(buf[i]) ^ maskKey[i & 3]);
+
+        uint8_t maskKey[4] = {0};
+        if (masked && recv(m_sockFd, maskKey, 4, MSG_WAITALL) != 4) return false;
+
+        if (payloadLen > 32 * 1024 * 1024) return false;
+        std::string buf(static_cast<size_t>(payloadLen), '\0');
+        if (payloadLen > 0) {
+            if (recv(m_sockFd, buf.data(), static_cast<size_t>(payloadLen), MSG_WAITALL) !=
+                static_cast<ssize_t>(payloadLen)) {
+                return false;
+            }
+            if (masked) {
+                for (size_t i = 0; i < buf.size(); ++i) {
+                    buf[i] = static_cast<char>(static_cast<uint8_t>(buf[i]) ^ maskKey[i & 3]);
+                }
             }
         }
+
+        if (opcode == 0x8) {
+            // Connection Close
+            disconnect();
+            return false;
+        } else if (opcode == 0x9) {
+            // Ping -> send masked Pong
+            uint8_t pongFrame[6] = { 0x8A, 0x80, 0x37, 0xFA, 0x21, 0x3D };
+            (void)send(m_sockFd, pongFrame, sizeof(pongFrame), 0);
+            continue;
+        } else if (opcode == 0xA) {
+            // Pong
+            continue;
+        }
+
+        *outText = std::move(buf);
+        return true;
     }
-    *outText = std::move(buf);
-    return true;
+    return false;
 #else
     (void)outText;
     (void)timeoutMs;
     return false;
 #endif
+}
+
+bool WriteNotesSyncClient::sendRpcRequest(
+    int id,
+    const std::string& requestJson,
+    std::string* outResponseJson,
+    int timeoutMs
+) {
+    if (!sendWebSocketTextFrame(requestJson)) return false;
+    for (int attempts = 0; attempts < 16; ++attempts) {
+        std::string frame;
+        if (!receiveWebSocketTextFrame(&frame, timeoutMs)) {
+            return false;
+        }
+        int frameId = extractJsonIntField(frame, "id", -1);
+        std::string method = extractJsonStringField(frame, "method");
+        if (frameId == id || (frameId > 0 && method.empty())) {
+            if (outResponseJson) *outResponseJson = std::move(frame);
+            return true;
+        }
+        if (!method.empty()) {
+            // Unsolicited server push notification (e.g. emacs.focusNode, presence.update)
+            m_pendingNotifications.push_back(std::move(frame));
+        }
+    }
+    return false;
+}
+
+bool WriteNotesSyncClient::fetchNodeList(
+    const std::string& filter,
+    std::vector<OrgNodeSummary>* outNodes
+) {
+    if (!isConnected() || !outNodes) return false;
+    int rpcId = m_nextRpcId++;
+    std::string req = buildNodeListJson(rpcId, filter, "");
+    std::string resp;
+    if (!sendRpcRequest(rpcId, req, &resp, 3000) || resp.find("\"error\"") != std::string::npos) {
+        return false;
+    }
+    *outNodes = parseNodeSummariesJson(resp);
+    return true;
+}
+
+bool WriteNotesSyncClient::fetchNodeSnapshot(
+    const std::string& nodeId,
+    OrgNodeSnapshotData* outSnapshot
+) {
+    if (!isConnected() || !outSnapshot) return false;
+    int rpcId = m_nextRpcId++;
+    std::string req = buildNodeGetJson(rpcId, nodeId);
+    std::string resp;
+    if (!sendRpcRequest(rpcId, req, &resp, 3000) || resp.find("\"error\"") != std::string::npos) {
+        return false;
+    }
+    std::string resObj = extractJsonObjectField(resp, "result");
+    if (resObj.empty()) return false;
+    return parseNodeSnapshotJson(resObj, outSnapshot);
+}
+
+bool WriteNotesSyncClient::insertInkBlock(
+    const std::string& nodeId,
+    int width,
+    int height,
+    int xRuling,
+    int yRuling,
+    OrgNodeSnapshotData* outSnapshot
+) {
+    if (!isConnected() || nodeId.empty()) return false;
+    int rpcId = m_nextRpcId++;
+    std::string req = buildInsertInkBlockJson(rpcId, nodeId, width, height, xRuling, yRuling);
+    std::string resp;
+    if (!sendRpcRequest(rpcId, req, &resp, 3000) || resp.find("\"error\"") != std::string::npos) {
+        return false;
+    }
+    if (outSnapshot) {
+        std::string resObj = extractJsonObjectField(resp, "result");
+        if (!resObj.empty()) {
+            parseNodeSnapshotJson(resObj, outSnapshot);
+        }
+    }
+    return true;
+}
+
+bool WriteNotesSyncClient::pollServerNotification(
+    std::string* outMethod,
+    std::string* outParamsJson,
+    int timeoutMs
+) {
+    if (!isConnected()) return false;
+
+    while (true) {
+        std::string frame;
+        if (!m_pendingNotifications.empty()) {
+            frame = std::move(m_pendingNotifications.front());
+            m_pendingNotifications.erase(m_pendingNotifications.begin());
+        } else {
+            if (!receiveWebSocketTextFrame(&frame, timeoutMs)) {
+                return false;
+            }
+        }
+        std::string method = extractJsonStringField(frame, "method");
+        if (method.empty()) continue;
+        std::string params = extractJsonObjectField(frame, "params");
+        if (outMethod) *outMethod = std::move(method);
+        if (outParamsJson) *outParamsJson = std::move(params);
+        return true;
+    }
 }
 
 std::string WriteNotesSyncClient::queueFilePath() const {
@@ -502,16 +885,27 @@ bool WriteNotesSyncClient::saveQueuedCommits(const std::vector<InkCommitPayload>
 }
 
 bool WriteNotesSyncClient::commitOrEnqueueInk(const InkCommitPayload& payload) {
+    InkCommitPayload effective = payload;
+    if (effective.baseEtag.empty()) {
+        effective.baseEtag = knownEtagForFile(effective.fileName);
+    }
+
     if (isConnected()) {
-        std::string msg = buildInkCommitJson(m_nextRpcId++, payload);
-        if (sendWebSocketTextFrame(msg)) {
-            std::string resp;
-            if (receiveWebSocketTextFrame(&resp, 2000)) {
-                if (resp.find("conflict") != std::string::npos) {
-                    recordConflict(payload.fileName);
-                }
-                return true;
+        int rpcId = m_nextRpcId++;
+        std::string msg = buildInkCommitJson(rpcId, effective);
+        std::string resp;
+        if (sendRpcRequest(rpcId, msg, &resp, 3000)) {
+            if (resp.find("\"conflict\":true") != std::string::npos ||
+                resp.find("\"conflict\": true") != std::string::npos) {
+                recordConflict(effective.fileName);
+            } else {
+                clearConflict(effective.fileName);
             }
+            std::string newEtag = extractJsonStringField(resp, "etag");
+            if (!newEtag.empty() && newEtag != "null") {
+                setKnownEtagForFile(effective.fileName, newEtag);
+            }
+            return true;
         }
         disconnect();
     }
@@ -520,11 +914,11 @@ bool WriteNotesSyncClient::commitOrEnqueueInk(const InkCommitPayload& payload) {
     auto queued = readQueuedCommits();
     queued.erase(
         std::remove_if(queued.begin(), queued.end(), [&](const InkCommitPayload& existing) {
-            return existing.nodeId == payload.nodeId && existing.fileName == payload.fileName;
+            return existing.nodeId == effective.nodeId && existing.fileName == effective.fileName;
         }),
         queued.end()
     );
-    queued.push_back(payload);
+    queued.push_back(effective);
     return saveQueuedCommits(queued);
 }
 
@@ -535,16 +929,31 @@ int WriteNotesSyncClient::replayOfflineQueue() {
     std::vector<InkCommitPayload> remaining;
     int sentCount = 0;
     for (const auto& item : queued) {
-        std::string msg = buildInkCommitJson(m_nextRpcId++, item);
-        if (sendWebSocketTextFrame(msg)) {
-            std::string resp;
-            if (receiveWebSocketTextFrame(&resp, 2000)) {
-                if (resp.find("conflict") != std::string::npos) {
-                    recordConflict(item.fileName);
-                }
-                ++sentCount;
-                continue;
+        // Drop legacy offline placeholder node commits so we never push fake inbox.org to Emacs
+        if (item.nodeId == "file:inbox.org::#scribe-quick-note" ||
+            item.fileName == "scribe-note.svgz") {
+            continue;
+        }
+        InkCommitPayload effective = item;
+        if (effective.baseEtag == "initial") {
+            effective.baseEtag.clear();
+        }
+        int rpcId = m_nextRpcId++;
+        std::string msg = buildInkCommitJson(rpcId, effective);
+        std::string resp;
+        if (sendRpcRequest(rpcId, msg, &resp, 3000)) {
+            if (resp.find("\"conflict\":true") != std::string::npos ||
+                resp.find("\"conflict\": true") != std::string::npos) {
+                recordConflict(effective.fileName);
+            } else {
+                clearConflict(effective.fileName);
             }
+            std::string newEtag = extractJsonStringField(resp, "etag");
+            if (!newEtag.empty() && newEtag != "null") {
+                setKnownEtagForFile(effective.fileName, newEtag);
+            }
+            ++sentCount;
+            continue;
         }
         remaining.push_back(item);
     }
@@ -563,6 +972,24 @@ void WriteNotesSyncClient::clearOfflineQueue() {
 void WriteNotesSyncClient::recordConflict(const std::string& fileName) {
     if (std::find(m_conflicts.begin(), m_conflicts.end(), fileName) == m_conflicts.end()) {
         m_conflicts.push_back(fileName);
+    }
+}
+
+void WriteNotesSyncClient::clearConflict(const std::string& fileName) {
+    m_conflicts.erase(
+        std::remove(m_conflicts.begin(), m_conflicts.end(), fileName),
+        m_conflicts.end()
+    );
+}
+
+std::string WriteNotesSyncClient::knownEtagForFile(const std::string& fileName) const {
+    auto it = m_knownEtags.find(fileName);
+    return (it != m_knownEtags.end()) ? it->second : "";
+}
+
+void WriteNotesSyncClient::setKnownEtagForFile(const std::string& fileName, const std::string& etag) {
+    if (!fileName.empty() && !etag.empty()) {
+        m_knownEtags[fileName] = etag;
     }
 }
 

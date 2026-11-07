@@ -51,6 +51,10 @@ void ScribeInputManager::closeDevices() {
 #if defined(__linux__)
     for (auto& node : m_nodes) {
         if (node.fd >= 0) {
+            if (node.grabbed) {
+                (void)ioctl(node.fd, EVIOCGRAB, 0);
+                node.grabbed = false;
+            }
             close(node.fd);
             node.fd = -1;
         }
@@ -67,6 +71,10 @@ int ScribeInputManager::discoverDevices(const char* inputDir) {
     if (!inputDir || !inputDir[0]) return 0;
     DIR* dir = opendir(inputDir);
     if (!dir) return 0;
+
+    bool haveGrabbedHardwareWacom = false;
+    int stylusCustomCandidateFd = -1;
+    EvdevNode stylusCustomCandidate{};
 
     while (struct dirent* ent = readdir(dir)) {
         if (std::strncmp(ent->d_name, "event", 5) != 0) continue;
@@ -91,16 +99,12 @@ int ScribeInputManager::discoverDevices(const char* inputDir) {
         char devName[256] = "Kindle Input";
         ioctl(fd, EVIOCGNAME(sizeof(devName) - 1), devName);
 
-        // Skip Amazon's virtual duplicate stylus node ("stylus-custom") so we only read hardware WacomDigitizer
-        if (std::strstr(devName, "stylus-custom") != nullptr) {
-            close(fd);
-            continue;
-        }
-
+        const bool isStylusCustom = (std::strstr(devName, "stylus-custom") != nullptr);
         const bool isWacom = testBit(keyBits, BTN_TOOL_PEN) ||
                              testBit(keyBits, BTN_TOOL_RUBBER) ||
                              testBit(keyBits, BTN_STYLUS) ||
-                             (std::strstr(devName, "Wacom") != nullptr);
+                             (std::strstr(devName, "Wacom") != nullptr) ||
+                             isStylusCustom;
         const bool isTouch = !isWacom &&
                              (testBit(absBits, ABS_MT_POSITION_X) ||
                               (testBit(absBits, ABS_X) && testBit(keyBits, BTN_TOUCH)));
@@ -136,23 +140,63 @@ int ScribeInputManager::discoverDevices(const char* inputDir) {
             node.tiltY = { absInfo.minimum, absInfo.maximum > absInfo.minimum ? absInfo.maximum : 60 };
         }
 
+        if (isStylusCustom) {
+            if (stylusCustomCandidateFd >= 0) {
+                close(stylusCustomCandidateFd);
+            }
+            stylusCustomCandidateFd = fd;
+            stylusCustomCandidate   = node;
+            continue;
+        }
+
+        node.grabbed = (ioctl(fd, EVIOCGRAB, 1) == 0);
+        if (isWacom && node.grabbed) {
+            haveGrabbedHardwareWacom = true;
+        }
+
         char descBuf[384];
         std::snprintf(
             descBuf,
             sizeof(descBuf),
-            "%s (X:%d..%d, Y:%d..%d, P:%d..%d)",
+            "%s (X:%d..%d, Y:%d..%d, P:%d..%d%s)",
             node.name.c_str(),
             node.absX.minimum,
             node.absX.maximum,
             node.absY.minimum,
             node.absY.maximum,
             node.pressure.minimum,
-            node.pressure.maximum
+            node.pressure.maximum,
+            node.grabbed ? ", grabbed" : ""
         );
         node.name = descBuf;
 
         m_nodes.push_back(node);
         m_deviceNames.push_back(node.name);
+    }
+
+    if (stylusCustomCandidateFd >= 0) {
+        if (!haveGrabbedHardwareWacom) {
+            stylusCustomCandidate.grabbed = (ioctl(stylusCustomCandidateFd, EVIOCGRAB, 1) == 0);
+            char descBuf[384];
+            std::snprintf(
+                descBuf,
+                sizeof(descBuf),
+                "%s (X:%d..%d, Y:%d..%d, P:%d..%d%s)",
+                stylusCustomCandidate.name.c_str(),
+                stylusCustomCandidate.absX.minimum,
+                stylusCustomCandidate.absX.maximum,
+                stylusCustomCandidate.absY.minimum,
+                stylusCustomCandidate.absY.maximum,
+                stylusCustomCandidate.pressure.minimum,
+                stylusCustomCandidate.pressure.maximum,
+                stylusCustomCandidate.grabbed ? ", grabbed" : ""
+            );
+            stylusCustomCandidate.name = descBuf;
+            m_nodes.push_back(stylusCustomCandidate);
+            m_deviceNames.push_back(stylusCustomCandidate.name);
+        } else {
+            close(stylusCustomCandidateFd);
+        }
     }
 
     closedir(dir);
@@ -270,13 +314,24 @@ int ScribeInputManager::pollEvents(std::vector<ScribeInputEvent>& outEvents, int
             if (iev.type == EV_KEY) {
                 if (iev.code == BTN_TOOL_PEN) {
                     node.penHover = (iev.value != 0);
-                    node.dirty    = true;
+                    if (!node.penHover && !node.rubberHover) {
+                        node.touching = false;
+                        node.curPress = node.pressure.minimum;
+                    }
+                    node.dirty = true;
                 } else if (iev.code == BTN_TOOL_RUBBER) {
                     node.rubberHover = (iev.value != 0);
-                    node.dirty       = true;
+                    if (!node.penHover && !node.rubberHover) {
+                        node.touching = false;
+                        node.curPress = node.pressure.minimum;
+                    }
+                    node.dirty = true;
                 } else if (iev.code == BTN_TOUCH) {
                     node.touching = (iev.value != 0);
-                    node.dirty    = true;
+                    if (!node.touching) {
+                        node.curPress = node.pressure.minimum;
+                    }
+                    node.dirty = true;
                 } else if (iev.code == BTN_STYLUS || iev.code == BTN_STYLUS2) {
                     node.barrelBtn = (iev.value != 0);
                     node.dirty     = true;
@@ -299,7 +354,10 @@ int ScribeInputManager::pollEvents(std::vector<ScribeInputEvent>& outEvents, int
                     node.dirty    = true;
                 } else if (iev.code == ABS_MT_TRACKING_ID) {
                     node.touching = (iev.value >= 0);
-                    node.dirty    = true;
+                    if (!node.touching) {
+                        node.curPress = node.pressure.minimum;
+                    }
+                    node.dirty = true;
                 }
             } else if (iev.type == EV_SYN && iev.code == SYN_REPORT && node.dirty) {
                 node.dirty = false;

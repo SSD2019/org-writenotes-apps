@@ -123,6 +123,7 @@ private:
         bool prevTouching  = false;
         bool barrelBtn     = false;
         bool dirty         = false;
+        bool grabbed       = false;
     };
 
     int m_screenWidth              = 1860;

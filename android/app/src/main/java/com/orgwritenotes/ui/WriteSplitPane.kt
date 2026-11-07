@@ -170,6 +170,7 @@ private fun TextPane(blocks: List<OrgBlock>) {
 private fun SketchPane(nodeId: String, block: OrgBlock.InkCanvasBlock, syncClient: EmacsSyncClient) {
     val isEInk = OnyxEInkBridge.isEInkDevice
     var ref by remember(block.fileName) { mutableStateOf<WriteCanvasBlockView?>(null) }
+    var lastLoadedSvgzBase64 by remember(block.fileName) { mutableStateOf(block.svgzBase64) }
     val emacsTheme by syncClient.emacsTheme.collectAsState()
     val effectiveDark = if (isEInk) false else emacsTheme.isDark
     val bgArgb = remember(emacsTheme) { emacsTheme.resolvedDarkBgArgb() }
@@ -204,6 +205,12 @@ private fun SketchPane(nodeId: String, block: OrgBlock.InkCanvasBlock, syncClien
         },
         update = { view ->
             view.setAdaptiveTheme(effectiveDark, bgArgb, fgArgb)
+            if (block.svgzBase64 != lastLoadedSvgzBase64 && !block.svgzBase64.isNullOrEmpty()) {
+                lastLoadedSvgzBase64 = block.svgzBase64
+                if (block.svgzBase64 != view.lastSyncedSvgzBase64) {
+                    view.loadFromBase64Svgz(block.svgzBase64)
+                }
+            }
         }
     )
 }

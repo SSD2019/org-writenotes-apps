@@ -1,6 +1,7 @@
 #include "eink_fb.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -350,24 +351,58 @@ void EinkFramebuffer::blitRgbaRegion(
 ) {
     if (!m_fbPtr || !srcRgba || rectWidth <= 0 || rectHeight <= 0) return;
 
-    for (int row = 0; row < rectHeight; ++row) {
+    int rowStart = std::max({ 0, -srcY, -dstY });
+    int rowEnd   = std::min({ rectHeight, srcHeight - srcY, m_height - dstY });
+    int colStart = std::max({ 0, -srcX, -dstX });
+    int colEnd   = std::min({ rectWidth, srcWidth - srcX, m_width - dstX });
+    if (rowStart >= rowEnd || colStart >= colEnd) return;
+
+    if (m_bpp == 8) {
+        for (int row = rowStart; row < rowEnd; ++row) {
+            int sy = srcY + row;
+            int dy = dstY + row;
+            const uint8_t* srcRow = srcRgba + (static_cast<size_t>(sy) * srcWidth + (srcX + colStart)) * 4;
+            uint8_t* dstRow       = m_fbPtr + static_cast<size_t>(dy) * m_stride + (dstX + colStart);
+            const uint8_t* bayerRow = kBayer4x4[dy & 3];
+
+            for (int col = colStart; col < colEnd; ++col, srcRow += 4, ++dstRow) {
+                uint8_t r = srcRow[0];
+                uint8_t g = srcRow[1];
+                uint8_t b = srcRow[2];
+                uint8_t a = srcRow[3];
+
+                if (a < 255) {
+                    r = static_cast<uint8_t>((r * a + 255 * (255 - a)) / 255);
+                    g = static_cast<uint8_t>((g * a + 255 * (255 - a)) / 255);
+                    b = static_cast<uint8_t>((b * a + 255 * (255 - a)) / 255);
+                }
+
+                uint8_t luma = (r == g && g == b)
+                    ? r
+                    : static_cast<uint8_t>((77 * r + 150 * g + 29 * b) >> 8);
+                if (dither1Bit) {
+                    int dx = dstX + col;
+                    luma = (luma <= bayerRow[dx & 3]) ? 0x00 : 0xFF;
+                }
+                *dstRow = luma;
+            }
+        }
+        return;
+    }
+
+    for (int row = rowStart; row < rowEnd; ++row) {
         int sy = srcY + row;
         int dy = dstY + row;
-        if (sy < 0 || sy >= srcHeight || dy < 0 || dy >= m_height) continue;
-
         const uint8_t* srcRow = srcRgba + (static_cast<size_t>(sy) * srcWidth) * 4;
-        for (int col = 0; col < rectWidth; ++col) {
+        for (int col = colStart; col < colEnd; ++col) {
             int sx = srcX + col;
             int dx = dstX + col;
-            if (sx < 0 || sx >= srcWidth || dx < 0 || dx >= m_width) continue;
-
             const uint8_t* p = srcRow + sx * 4;
             uint8_t r = p[0];
             uint8_t g = p[1];
             uint8_t b = p[2];
             uint8_t a = p[3];
 
-            // Composite translucent pixels over white paper (0xFF)
             if (a < 255) {
                 r = static_cast<uint8_t>((r * a + 255 * (255 - a)) / 255);
                 g = static_cast<uint8_t>((g * a + 255 * (255 - a)) / 255);
@@ -416,6 +451,42 @@ void EinkFramebuffer::drawRectBorder(int x, int y, int w, int h, int thickness, 
 
 void EinkFramebuffer::drawHLine(int x, int y, int w, uint8_t grayLevel) {
     fillRect(x, y, w, 1, grayLevel);
+}
+
+void EinkFramebuffer::drawThickLine(float x0, float y0, float x1, float y1, float radius, uint8_t grayLevel) {
+    if (!m_fbPtr) return;
+    float r = std::max(0.8f, radius);
+    int minX = std::max(0, static_cast<int>(std::floor(std::min(x0, x1) - r)));
+    int maxX = std::min(m_width - 1, static_cast<int>(std::ceil(std::max(x0, x1) + r)));
+    int minY = std::max(0, static_cast<int>(std::floor(std::min(y0, y1) - r)));
+    int maxY = std::min(m_height - 1, static_cast<int>(std::ceil(std::max(y0, y1) + r)));
+    if (minX > maxX || minY > maxY) return;
+
+    float dx = x1 - x0;
+    float dy = y1 - y0;
+    float lenSq = dx * dx + dy * dy;
+    float rSq = r * r;
+
+    for (int py = minY; py <= maxY; ++py) {
+        float fy = static_cast<float>(py);
+        uint8_t* rowPtr = (m_bpp == 8) ? (m_fbPtr + static_cast<size_t>(py) * m_stride) : nullptr;
+        for (int px = minX; px <= maxX; ++px) {
+            float fx = static_cast<float>(px);
+            float t = (lenSq > 1e-4f)
+                ? std::clamp(((fx - x0) * dx + (fy - y0) * dy) / lenSq, 0.0f, 1.0f)
+                : 0.0f;
+            float cx = x0 + t * dx;
+            float cy = y0 + t * dy;
+            float distSq = (fx - cx) * (fx - cx) + (fy - cy) * (fy - cy);
+            if (distSq <= rSq) {
+                if (rowPtr) {
+                    rowPtr[px] = grayLevel;
+                } else {
+                    setPixelGray(px, py, grayLevel);
+                }
+            }
+        }
+    }
 }
 
 void EinkFramebuffer::drawText(int x, int y, const std::string& text, uint8_t fgGray, uint8_t bgGray, int scale) {

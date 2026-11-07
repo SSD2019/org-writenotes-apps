@@ -52,6 +52,9 @@ void printUsage(const char* prog) {
 int main(int argc, char** argv) {
     using namespace orgwritenotes::kindle;
 
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+    std::setvbuf(stderr, nullptr, _IOLBF, 0);
+
     std::string configPath = "/mnt/us/org-writenotes/config.json";
     std::string fbPath     = "/dev/fb0";
     std::string inputDir   = "/dev/input";
@@ -190,30 +193,62 @@ int main(int argc, char** argv) {
 
     int devCount = app.input().discoverDevices(inputDir.c_str());
 
-    app.syncClient().loadConfigFile(configPath);
-    app.syncClient().connectAndHandshake();
-
     if (!sketchPath.empty()) {
         app.loadSketchFile(sketchPath);
     }
 
+    app.syncClient().loadConfigFile(configPath);
+    bool synced = app.syncWithServer();
+    // Always re-render full screen after initial sync attempt (even if offline/unreachable)
+    // so the UI recovers if com.lab126.webview flashed /dev/fb0 during initialization.
+    app.renderFullScreen(/*fullFlash=*/!synced);
+
+    app.setDeferAutoCommit(true);
+
     std::printf(
-        "[Kindle-Scribe] Running on %dx%d E-Ink display (%d input devices). Tap [Exit] or Ctrl+C to quit.\n",
+        "[Kindle-Scribe] Running on %dx%d E-Ink display (%d input devices, connected=%s, host=%s). Tap [Exit] or Ctrl+C to quit.\n",
         app.framebuffer().width(),
         app.framebuffer().height(),
-        devCount
+        devCount,
+        app.syncClient().isConnected() ? "yes" : "no",
+        app.syncClient().host().c_str()
     );
 
     std::vector<ScribeInputEvent> events;
-    events.reserve(32);
+    events.reserve(64);
+    int idlePolls = 0;
+    int startupTicks = 0;
     while (!g_stopRequested && !app.shouldExit()) {
         events.clear();
         int n = app.input().pollEvents(events, 16);
-        for (int i = 0; i < n; ++i) {
-            app.handleInputEvent(events[static_cast<size_t>(i)]);
+        if (n > 0) {
+            idlePolls = 0;
+            for (int i = 0; i < n; ++i) {
+                app.handleInputEvent(events[static_cast<size_t>(i)]);
+            }
+        } else {
+            ++idlePolls;
+            if (startupTicks < 200) {
+                ++startupTicks;
+                // Guard against late com.lab126.webview Wi-Fi registration postAppFlash overwrites
+                if ((startupTicks == 60 || startupTicks == 150) && !app.isStrokeActive()) {
+                    app.renderFullScreen(/*fullFlash=*/false);
+                }
+            }
+            if ((idlePolls % 10) == 0 && !app.isStrokeActive()) {
+                app.pollServerNotifications();
+            }
+            if (idlePolls >= 120 &&
+                app.hasPendingCommit() &&
+                !app.isStrokeActive() &&
+                !app.input().isStylusInProximity()) {
+                app.flushPendingCommit();
+                idlePolls = 0;
+            }
         }
     }
 
+    app.flushPendingCommit();
     std::printf("[Kindle-Scribe] Exiting cleanly.\n");
     return 0;
 }

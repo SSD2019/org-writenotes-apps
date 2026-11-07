@@ -1,21 +1,29 @@
 #!/usr/bin/env bash
-# deploy_usb.sh — One-command build & USB-SSH deploy to Jailbroken Kindle Scribe (Jobman USB mode)
+# deploy_usb.sh — One-command build & SSH deploy to Jailbroken Kindle Scribe (Jobman USB or Wi-Fi mode)
 # Usage: ./kindle/deploy_usb.sh [kindle_ip] [kindle_password]
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-KINDLE_IP="${1:-192.168.15.244}"
+KINDLE_IP="${1:-}"
 KINDLE_PW="${2:-kindle}"
 HOST_USB_IP="192.168.15.201/24"
+HOST_LAN_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}' || true)"
 
-# 1. Ensure the host USB RNDIS/ECM interface has 192.168.15.201/24 configured
-if ! ping -c 1 -W 1 "$KINDLE_IP" >/dev/null 2>&1; then
-    echo "=== Configuring Host USB Network Interface ($HOST_USB_IP) ==="
-    USB_CONN="$(nmcli -t -f NAME,DEVICE,TYPE connection show | awk -F: '$2 ~ /^enx|^usb/ {print $1; exit}')"
-    if [[ -n "${USB_CONN:-}" ]]; then
-        nmcli connection modify "$USB_CONN" ipv4.method manual ipv4.addresses "$HOST_USB_IP" ipv4.never-default yes
-        nmcli connection up "$USB_CONN"
+# 1. Auto-detect USB (192.168.15.244) or Wi-Fi (192.168.1.150) Kindle IP if not explicitly specified
+if [[ -z "$KINDLE_IP" ]]; then
+    if ping -c 1 -W 1 192.168.15.244 >/dev/null 2>&1; then
+        KINDLE_IP="192.168.15.244"
+    elif ping -c 1 -W 1 192.168.1.150 >/dev/null 2>&1; then
+        KINDLE_IP="192.168.1.150"
+    else
+        KINDLE_IP="192.168.15.244"
+        echo "=== Configuring Host USB Network Interface ($HOST_USB_IP) ==="
+        USB_CONN="$(nmcli -t -f NAME,DEVICE,TYPE connection show | awk -F: '$2 ~ /^enx|^usb/ {print $1; exit}')"
+        if [[ -n "${USB_CONN:-}" ]]; then
+            nmcli connection modify "$USB_CONN" ipv4.method manual ipv4.addresses "$HOST_USB_IP" ipv4.never-default yes
+            nmcli connection up "$USB_CONN"
+        fi
     fi
 fi
 
@@ -25,10 +33,10 @@ fi
 TARBALL="$SCRIPT_DIR/dist/org-writenotes-kindle-scribe.tar.gz"
 
 echo "=== Deploying $TARBALL to root@$KINDLE_IP:/mnt/us/ ==="
-python3 - "$TARBALL" "$KINDLE_IP" "$KINDLE_PW" <<'PYEOF'
+python3 - "$TARBALL" "$KINDLE_IP" "$KINDLE_PW" "${HOST_LAN_IP:-192.168.1.145}" <<'PYEOF'
 import os, pty, select, sys, time
 
-tarball, ip, pw = sys.argv[1], sys.argv[2], sys.argv[3]
+tarball, ip, pw, wifi_host = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 def run_ssh(argv):
     pid, fd = pty.fork()
@@ -50,6 +58,7 @@ def run_ssh(argv):
                     sent_pw = True
             except OSError:
                 break
+    os.close(fd)
     os.waitpid(pid, 0)
     return out.decode("utf-8", errors="replace")
 
@@ -62,13 +71,23 @@ print(run_ssh([
 ]))
 
 remote_cmd = (
+    "killall org-writenotes-kindle 2>/dev/null || true && "
+    "cp /mnt/us/org-writenotes/config.json /tmp/own_config.bak 2>/dev/null || true && "
     "tar -xzf /tmp/own.tar.gz -C /mnt/us/ && "
     "rm -f /tmp/own.tar.gz && "
-    "chmod +x /mnt/us/org-writenotes/bin/org-writenotes-kindle /mnt/us/documents/Org-WriteNotes*.sh && "
+    "if [ -f /tmp/own_config.bak ]; then "
+    "  OLD_TOK=$(sed -n 's/.*\"token\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' /tmp/own_config.bak | head -n 1); "
+    "  if [ -n \"$OLD_TOK\" ] && [ \"$OLD_TOK\" != \"replace-with-org-writenotes-session-token\" ]; then "
+    "    sed -i \"s/\\\"token\\\"[[:space:]]*:[[:space:]]*\\\"[^\\\"]*\\\"/\\\"token\\\": \\\"$OLD_TOK\\\"/\" /mnt/us/org-writenotes/config.json; "
+    "  fi; "
+    "  rm -f /tmp/own_config.bak; "
+    "fi && "
+    f"sed -i 's/\"wifiHost\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"wifiHost\": \"{wifi_host}\"/' /mnt/us/org-writenotes/config.json && "
+    "chmod +x /mnt/us/org-writenotes/bin/org-writenotes-kindle /mnt/us/org-writenotes/run.sh /mnt/us/documents/Org-WriteNotes*.sh && "
     "/mnt/us/org-writenotes/bin/org-writenotes-kindle --devices"
 )
 print(run_ssh([
-    "ssh",
+    "ssh", "-T", "-x",
     "-o", "StrictHostKeyChecking=no",
     "-o", "UserKnownHostsFile=/dev/null",
     f"root@{ip}",

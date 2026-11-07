@@ -257,12 +257,13 @@ fun WriteZoomedEditorOverlay(
         if (dock == ToolbarDock.TOP) toolbar()
 
         val overlayRects = remember { mutableStateMapOf<String, android.graphics.Rect>() }
-        // Emacs replaced this sketch (conflict resolved): show the resolved version.
+        // Emacs replaced this sketch (conflict resolved or peer updated): show the new version.
         LaunchedEffect(block.fileName) {
             syncClient.sketchReloads.collect { (file, b64) ->
                 if (file == block.fileName) canvasViewRef?.loadFromBase64Svgz(b64)
             }
         }
+        var lastLoadedSvgzBase64 by remember(block.blockId) { mutableStateOf(block.svgzBase64) }
         var showMinimap by remember { mutableStateOf(false) }
         Box(
             modifier = Modifier
@@ -349,6 +350,12 @@ fun WriteZoomedEditorOverlay(
                 update = { view ->
                     view.setAdaptiveTheme(effectiveDark, bgArgb, fgArgb)
                     view.rawExcludeWindowRects = overlayRects.values.toList()
+                    if (block.svgzBase64 != lastLoadedSvgzBase64 && !block.svgzBase64.isNullOrEmpty()) {
+                        lastLoadedSvgzBase64 = block.svgzBase64
+                        if (block.svgzBase64 != view.lastSyncedSvgzBase64) {
+                            view.loadFromBase64Svgz(block.svgzBase64)
+                        }
+                    }
                 },
                 modifier = Modifier.fillMaxSize()
             )

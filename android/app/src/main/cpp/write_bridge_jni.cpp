@@ -638,6 +638,9 @@ bool NativeCanvasSession::renderToPixels(
         ? Rect::ltwh(originX, originY, bmpWidth, bmpHeight)
         : Rect::wh(static_cast<Dim>(m_width), static_cast<Dim>(m_height));
     m_page->draw(m_swPainter.get(), fullRect, /*rulelines=*/true);
+    if (m_activeStroke && m_activeStroke->getElement() && m_activeStroke->getElement()->node) {
+        SvgPainter(m_swPainter.get()).drawNode(m_activeStroke->getElement()->node, fullRect);
+    }
     m_swPainter->endFrame();
     m_swPainter->setTarget(nullptr);
     targetImg.data = nullptr;
@@ -844,6 +847,9 @@ bool NativeCanvasSession::renderDirtyRectToPixels(
     );
     m_swPainter->setClipRect(clipRect);
     m_page->draw(m_swPainter.get(), clipRect, /*rulelines=*/true);
+    if (m_activeStroke && m_activeStroke->getElement() && m_activeStroke->getElement()->node) {
+        SvgPainter(m_swPainter.get()).drawNode(m_activeStroke->getElement()->node, clipRect);
+    }
     m_swPainter->endFrame();
     m_swPainter->setTarget(nullptr);
     targetImg.data = nullptr;

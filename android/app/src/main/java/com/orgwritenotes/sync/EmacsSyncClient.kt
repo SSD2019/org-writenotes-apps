@@ -102,7 +102,7 @@ class EmacsSyncClient(
     private val pendingInkCommits = ConcurrentHashMap<String, PendingInkCommit>()
 
     companion object {
-        const val INK_COMMIT_DEBOUNCE_MS = 3000L
+        const val INK_COMMIT_DEBOUNCE_MS = 1200L
         const val PROTOCOL_VERSION = 2
         private const val RECOVERY_DEBOUNCE_MS = 1000L
         const val LARGE_SKETCH_BASE64_CHARS = 1_500_000
@@ -598,6 +598,21 @@ class EmacsSyncClient(
     }
 
     fun setCheckboxState(nodeId: String, line: Int, state: ChecklistState) {
+        _activeSnapshot.update { cur ->
+            if (cur != null && cur.nodeId == nodeId) {
+                cur.copy(blocks = cur.blocks.map { blk ->
+                    if (blk is OrgBlock.ChecklistBlock) {
+                        blk.copy(items = blk.items.map { item ->
+                            if (item.line == line) item.copy(state = state) else item
+                        })
+                    } else {
+                        blk
+                    }
+                })
+            } else {
+                cur
+            }
+        }
         val params = JSONObject().apply {
             put("nodeId", nodeId)
             put("line", line)
@@ -1344,8 +1359,18 @@ class EmacsSyncClient(
         )
 
     private fun updateActiveSnapshot(obj: JSONObject) {
+        val prev = _activeSnapshot.value
         val snap = preservePendingInk(parseSnapshot(obj))
         _activeSnapshot.value = snap
+        if (prev != null && prev.nodeId == snap.nodeId) {
+            val prevInk = prev.blocks.filterIsInstance<OrgBlock.InkCanvasBlock>().associateBy { it.fileName }
+            for (blk in snap.blocks.filterIsInstance<OrgBlock.InkCanvasBlock>()) {
+                val b64 = blk.svgzBase64 ?: continue
+                if (!pendingInkCommits.containsKey(blk.fileName) && prevInk[blk.fileName]?.svgzBase64 != b64) {
+                    _sketchReloads.tryEmit(blk.fileName to b64)
+                }
+            }
+        }
         saveCachedSnapshotToDisk(snap.nodeId, obj)
         if (snap.nodeId.isNotEmpty()) {
             val summary = summaryFromSnapshot(snap)
@@ -1607,18 +1632,34 @@ class EmacsSyncClient(
                     blocks.add(OrgBlock.ChecklistBlock(blockId, startLine, resolvedEndLine, items))
                 }
                 "ink_canvas" -> {
+                    val fileName = b.optString("fileName", "sketch.svgz")
+                    val svgzBase64 = b.optString("svgzBase64").takeIf { it.isNotEmpty() && it != "null" }
+                    val blockEtag = b.optString("etag", "").takeIf { it.isNotEmpty() && it != "null" }
+                    if (!pendingInkCommits.containsKey(fileName)) {
+                        if (blockEtag != null) {
+                            knownEtags[fileName] = blockEtag
+                        } else if (svgzBase64 != null) {
+                            val prevB64 = _activeSnapshot.value?.blocks
+                                ?.filterIsInstance<OrgBlock.InkCanvasBlock>()
+                                ?.firstOrNull { it.fileName == fileName }
+                                ?.svgzBase64
+                            if (prevB64 != null && prevB64 != svgzBase64) {
+                                knownEtags.remove(fileName)
+                            }
+                        }
+                    }
                     blocks.add(
                         OrgBlock.InkCanvasBlock(
                             blockId = blockId,
                             startLine = startLine,
                             endLine = endLine,
-                            fileName = b.optString("fileName", "sketch.svgz"),
+                            fileName = fileName,
                             linkText = b.optString("linkText", ""),
                             width = b.optInt("width", 1200),
                             height = b.optInt("height", 600),
                             xRuling = b.optInt("xRuling", 40),
                             yRuling = b.optInt("yRuling", 40),
-                            svgzBase64 = b.optString("svgzBase64").takeIf { it.isNotEmpty() && it != "null" }
+                            svgzBase64 = svgzBase64
                         )
                     )
                 }

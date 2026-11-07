@@ -71,11 +71,12 @@ public:
         bool dither1Bit = false
     );
 
-    // Drawing primitives for the E-Ink Top Bar, Status Pill, and Outline/Agenda Sidebar
+    // Drawing primitives for the E-Ink Top Bar, Status Pill, Outline/Agenda Sidebar, and fast DU stroke trace
     void fillRect(int x, int y, int w, int h, uint8_t grayLevel);
     void drawRectBorder(int x, int y, int w, int h, int thickness, uint8_t grayLevel);
     void drawHLine(int x, int y, int w, uint8_t grayLevel);
     void drawText(int x, int y, const std::string& text, uint8_t fgGray, uint8_t bgGray, int scale = 2);
+    void drawThickLine(float x0, float y0, float x1, float y1, float radius, uint8_t grayLevel);
 
     // Triggers an EPDC screen refresh on the given rectangle using MXCFB_SEND_UPDATE ioctl
     uint32_t refreshRect(const EinkRect& rect, EinkWaveform waveform, bool fullFlash = false);

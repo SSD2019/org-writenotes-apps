@@ -799,6 +799,9 @@ class WriteCanvasBlockView(
         private set
 
     @Volatile
+    private var loadingSvgzBase64: String? = null
+
+    @Volatile
     private var adoptedPeer: WriteCanvasBlockView? = null
 
     // Pan & multi-finger tap gesture tracking
@@ -1316,30 +1319,68 @@ class WriteCanvasBlockView(
 
     fun loadFromBase64Svgz(base64: String?) {
         if (base64.isNullOrEmpty()) return
-        if (base64 == lastSyncedSvgzBase64) return
+        if (base64 == lastSyncedSvgzBase64 || base64 == loadingSvgzBase64) return
+        if (base64 == adoptedPeer?.lastSyncedSvgzBase64 || base64 == adoptedPeer?.loadingSvgzBase64) {
+            lastSyncedSvgzBase64 = base64
+            cachedDetachedSvgzBase64 = base64
+            if (base64 == adoptedPeer?.lastSyncedSvgzBase64) {
+                mainHandler.post {
+                    synchronized(nativeLock) { refreshBackingBitmap() }
+                }
+            }
+            return
+        }
         synchronized(nativeLock) {
+            loadingSvgzBase64 = base64
             cachedDetachedSvgzBase64 = base64
             hasUncommittedChanges = false
+            adoptedPeer?.let { peer ->
+                peer.loadingSvgzBase64 = base64
+                peer.cachedDetachedSvgzBase64 = base64
+                peer.hasUncommittedChanges = false
+            }
         }
         exportExecutor.execute {
             // Decode outside nativeLock so the main thread isn't blocked on base64 work.
             val decoded = runCatching { Base64.decode(base64, Base64.DEFAULT) }.getOrNull()
             val loaded = synchronized(nativeLock) {
                 if (decoded == null || nativeHandle == 0L || cachedDetachedSvgzBase64 != base64) {
+                    if (loadingSvgzBase64 == base64) loadingSvgzBase64 = null
+                    adoptedPeer?.let { peer ->
+                        if (peer.loadingSvgzBase64 == base64) peer.loadingSvgzBase64 = null
+                    }
                     false
                 } else {
                     val ok = WriteNativeBridge.nativeLoadSvgz(nativeHandle, decoded)
                     if (ok) {
                         lastSyncedSvgzBase64 = base64
+                        loadingSvgzBase64 = null
+                        adoptedPeer?.let { peer ->
+                            peer.lastSyncedSvgzBase64 = base64
+                            peer.loadingSvgzBase64 = null
+                            peer.cachedDetachedSvgzBase64 = base64
+                        }
                         applyEInkPaperDefaultsIfNeeded()
                         WriteNativeBridge.nativeSetRenderTheme(nativeHandle, isDarkTheme, darkBgColorArgb, darkFgColorArgb)
+                    } else {
+                        if (loadingSvgzBase64 == base64) loadingSvgzBase64 = null
+                        adoptedPeer?.let { peer ->
+                            if (peer.loadingSvgzBase64 == base64) peer.loadingSvgzBase64 = null
+                        }
                     }
                     ok
                 }
             }
             if (loaded) {
                 mainHandler.post {
-                    synchronized(nativeLock) { refreshBackingBitmap() }
+                    synchronized(nativeLock) {
+                        refreshBackingBitmap()
+                        adoptedPeer?.let { peer ->
+                            synchronized(peer.nativeLock) {
+                                peer.refreshBackingBitmap()
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1363,6 +1404,11 @@ class WriteCanvasBlockView(
             cachedDetachedSvgzBase64 = encoded
             lastSyncedSvgzBase64 = encoded
             hasUncommittedChanges = false
+            adoptedPeer?.let { peer ->
+                peer.cachedDetachedSvgzBase64 = encoded
+                peer.lastSyncedSvgzBase64 = encoded
+                peer.hasUncommittedChanges = false
+            }
         }
         return encoded
     }
