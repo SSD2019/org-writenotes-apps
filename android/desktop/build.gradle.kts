@@ -79,6 +79,22 @@ compose.desktop {
     }
 }
 
+afterEvaluate {
+    tasks.findByName("createDistributable")?.let { distTask ->
+        distTask.dependsOn(buildLinuxNative)
+        distTask.doLast {
+            copy {
+                from(nativeBuildDir.resolve("liborgwritenotes_jni.so"))
+                into(layout.buildDirectory.dir("compose/binaries/main/app/org-writenotes/lib"))
+            }
+            copy {
+                from(nativeBuildDir.resolve("liborgwritenotes_jni.so"))
+                into(layout.buildDirectory.dir("compose/binaries/main/app/org-writenotes/lib/app"))
+            }
+        }
+    }
+}
+
 tasks.withType<JavaExec>().configureEach {
     dependsOn(buildLinuxNative)
     jvmArgs("-Djava.library.path=${nativeBuildDir.absolutePath}")

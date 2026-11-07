@@ -22,6 +22,12 @@ ios/.build/
 ios/.swiftpm/
 *.xcodeproj
 *.xcworkspace
+*.ipa
+
+# Distribution & Releases
+dist/
+release-assets/
+
 
 # IDE
 .idea/

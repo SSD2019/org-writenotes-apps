@@ -41,12 +41,31 @@ Core vector ink rendering and manipulation across all clients is powered by the 
   - Apple Pencil (hover, pressure, tilt) and PencilKit integration.
   - Custom C API bridge to Stylus Labs Write vector engine.
   - Deep-link pairing via `orgwritenotes://connect?host=...&port=...&token=...`.
-- **Building:**
+- **Building & Packaging:**
   ```bash
   cd ios
-  ./build_xcframework.sh
-  swift build
+  # To run unit tests:
+  swift test
+
+  # To build and package iPadOS .ipa (ready for AltStore / TrollStore / Sideloadly):
+  ./build_ipa.sh
   ```
+
+---
+
+## CI/CD & Automated Releases
+
+The multi-platform GitHub Actions workflow (`.github/workflows/ci.yml`) compiles, tests, and packages all companion clients across macOS and Linux:
+
+| Platform | Format / Artifact | Build Runner |
+| :--- | :--- | :--- |
+| **Android Tablet / E-Ink** | `org-writenotes-android.apk`, `app-debug.apk` | `ubuntu-latest` |
+| **Linux Desktop (X11/Wayland)** | `org-writenotes_*.deb`, `org-writenotes-linux-x86_64.tar.gz` | `ubuntu-latest` |
+| **iPadOS** | `OrgWriteNotes-iPadOS.ipa` | `macos-14` |
+
+- **CI Artifacts:** Available on every push and PR to `main` under GitHub Actions run artifacts.
+- **GitHub Releases:** Tagging a release (e.g. `git tag v0.1.0 && git push --tags`) or publishing a GitHub Release automatically packages and attaches all three platform binaries (`.ipa`, `.apk`, `.deb`, `.tar.gz`) to the release.
+
 
 ---
 
