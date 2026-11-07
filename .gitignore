@@ -6,6 +6,7 @@ android/build/
 android/app/build/
 android/app/.cxx/
 android/desktop/build/
+android/desktop/bin/
 android/ios-kmp/build/
 android/local.properties
 android/hs_err_pid*.log
