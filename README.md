@@ -59,4 +59,4 @@ Core vector ink rendering and manipulation across all clients is powered by the 
 
 ## Emacs Server Plugin
 The Emacs server-side package (`org-writenotes.el`, `org-writenotes-extras.el`, TrOCR handwriting recognition) is maintained in its dedicated repository:
-- Emacs Plugin Repository: `~/.vim/emacs_plugin/org-writenotes`
+- Emacs Plugin Repository: [**SSD2019/org-writenotes**](https://github.com/SSD2019/org-writenotes)
