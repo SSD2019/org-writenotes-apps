@@ -8,5 +8,4 @@
 #define SCRIBBLE_REV_NUMBER "orgwritenotes-ios"
 #endif
 
-#include "../../../android/app/src/main/cpp/write_bridge_jni.cpp"
-
+#include "shared_headers/app_cpp/write_bridge_jni.cpp"
