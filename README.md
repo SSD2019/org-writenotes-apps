@@ -61,7 +61,7 @@ The multi-platform GitHub Actions workflow (`.github/workflows/ci.yml`) compiles
 | :--- | :--- | :--- |
 | **Android Tablet / E-Ink** | `org-writenotes-android.apk`, `app-debug.apk` | `ubuntu-latest` |
 | **Linux Desktop (X11/Wayland)** | `org-writenotes_*.deb`, `org-writenotes-linux-x86_64.tar.gz` | `ubuntu-latest` |
-| **iPadOS** | `OrgWriteNotes-iPadOS.ipa` | `macos-14` |
+| **iPadOS** | `OrgWriteNotes-iPadOS.ipa` | `macos-15` |
 
 - **CI Artifacts:** Available on every push and PR to `main` under GitHub Actions run artifacts.
 - **GitHub Releases:** Tagging a release (e.g. `git tag v0.1.0 && git push --tags`) or publishing a GitHub Release automatically packages and attaches all three platform binaries (`.ipa`, `.apk`, `.deb`, `.tar.gz`) to the release.
