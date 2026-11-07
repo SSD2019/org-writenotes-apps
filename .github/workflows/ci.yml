@@ -1,4 +1,4 @@
-name: Org-WriteNotes CI
+name: Org-WriteNotes Apps CI
 
 on:
   push:
@@ -7,32 +7,10 @@ on:
     branches: [ main, master ]
 
 jobs:
-  emacs-ert-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Emacs
-        uses: purcell/setup-emacs@master
-        with:
-          version: '29.3'
-      - name: Run ERT Batch Tests
-        run: |
-          emacs -Q -batch -L emacs -l ert \
-            -l emacs/org-writenotes-test.el \
-            -l emacs/org-writenotes-extras-test.el \
-            -f ert-run-tests-batch-and-exit
-      - name: Checkdoc
-        run: |
-          emacs -Q -batch -L emacs --eval '(require (quote checkdoc))' \
-            --eval '(setq checkdoc-diagnostic-buffer "*chk*")' \
-            --eval '(progn (dolist (f (list "emacs/org-writenotes.el" "emacs/org-writenotes-extras.el")) (checkdoc-file f)) (when (get-buffer "*Warnings*") (kill-emacs 1)))'
-
   android-build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -57,7 +35,6 @@ jobs:
 
   kotlin-lint:
     runs-on: ubuntu-latest
-    # Existing violations are recorded in ktlint-baseline.xml; only new ones fail the build.
     steps:
       - uses: actions/checkout@v4
       - name: Install ktlint

@@ -1,13 +1,34 @@
+# Android & Gradle
 .android-sdk/
-graphify-out/
-.graphify/
-.graphify*
-android/local.properties
+.gradle/
 android/.gradle/
 android/build/
 android/app/build/
 android/app/.cxx/
-
+android/desktop/build/
+android/ios-kmp/build/
+android/local.properties
 android/hs_err_pid*.log
 android/replay_pid*.log
-.gradle/
+*.log
+
+# Linux native
+linux/build-native/
+
+# iOS / Swift
+ios/build/
+ios/.build/
+ios/.swiftpm/
+*.xcodeproj
+*.xcworkspace
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# System & metadata
+.DS_Store
+graphify-out/
+.graphify/
+.graphify*

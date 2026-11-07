@@ -22,7 +22,9 @@
 #include "ulib/fileutil.h"
 
 #include "write_bridge_jni.h"
+#ifdef __ANDROID__
 #include <android/bitmap.h>
+#endif
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -2479,6 +2481,43 @@ bool NativeCanvasSession::canRedo() const {
     return m_doc && m_doc->history && m_doc->history->canRedo();
 }
 
+#if !defined(__ANDROID__) && !defined(ORGWRITENOTES_NO_JNI) && (!defined(__APPLE__) || defined(ORGWRITENOTES_ENABLE_JNI))
+template <typename RenderFn>
+static bool lockDesktopBitmapAndRender(
+    JNIEnv* env,
+    jobject bitmap,
+    RenderFn&& renderFn
+) {
+    if (!env || !bitmap) return false;
+    jclass cls = env->GetObjectClass(bitmap);
+    if (!cls) return false;
+    jfieldID wField = env->GetFieldID(cls, "width", "I");
+    jfieldID hField = env->GetFieldID(cls, "height", "I");
+    jfieldID pxField = env->GetFieldID(cls, "rgbaPixels", "[B");
+    jfieldID genField = env->GetFieldID(cls, "generation", "I");
+    if (!wField || !hField || !pxField) return false;
+
+    const int w = env->GetIntField(bitmap, wField);
+    const int h = env->GetIntField(bitmap, hField);
+    if (w <= 0 || h <= 0) return false;
+
+    auto pxArray = static_cast<jbyteArray>(env->GetObjectField(bitmap, pxField));
+    if (!pxArray) return false;
+    const jsize expectedBytes = static_cast<jsize>(w) * static_cast<jsize>(h) * 4;
+    if (env->GetArrayLength(pxArray) < expectedBytes) return false;
+
+    jbyte* ptr = env->GetByteArrayElements(pxArray, nullptr);
+    if (!ptr) return false;
+    const bool ok = renderFn(reinterpret_cast<uint8_t*>(ptr), w, h);
+    env->ReleaseByteArrayElements(pxArray, ptr, ok ? 0 : JNI_ABORT);
+    if (ok && genField) {
+        const jint gen = env->GetIntField(bitmap, genField);
+        env->SetIntField(bitmap, genField, gen + 1);
+    }
+    return ok;
+}
+#endif
+
 } // namespace orgwritenotes
 
 // ----------------------------------------------------------------------------
@@ -2486,6 +2525,8 @@ bool NativeCanvasSession::canRedo() const {
 // ----------------------------------------------------------------------------
 
 extern "C" {
+
+#if !defined(ORGWRITENOTES_NO_JNI) && (!defined(__APPLE__) || defined(ORGWRITENOTES_ENABLE_JNI))
 
 JNIEXPORT jlong JNICALL
 Java_com_orgwritenotes_ink_WriteNativeBridge_nativeCreateSession(
@@ -2556,6 +2597,7 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeRenderToBitmap(
 ) {
     auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
     if (!session || !bitmap) return JNI_FALSE;
+#ifdef __ANDROID__
     AndroidBitmapInfo info{};
     if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) {
         return JNI_FALSE;
@@ -2574,6 +2616,12 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeRenderToBitmap(
     );
     AndroidBitmap_unlockPixels(env, bitmap);
     return ok ? JNI_TRUE : JNI_FALSE;
+#else
+    bool ok = orgwritenotes::lockDesktopBitmapAndRender(env, bitmap, [&](uint8_t* pixels, int w, int h) {
+        return session->renderToPixels(pixels, w, h);
+    });
+    return ok ? JNI_TRUE : JNI_FALSE;
+#endif
 }
 
 JNIEXPORT jboolean JNICALL
@@ -2582,6 +2630,7 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeRenderTileToBitmap(
 ) {
     auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
     if (!session || !bitmap) return JNI_FALSE;
+#ifdef __ANDROID__
     AndroidBitmapInfo info{};
     if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) return JNI_FALSE;
     if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return JNI_FALSE;
@@ -2598,6 +2647,12 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeRenderTileToBitmap(
     );
     AndroidBitmap_unlockPixels(env, bitmap);
     return ok ? JNI_TRUE : JNI_FALSE;
+#else
+    bool ok = orgwritenotes::lockDesktopBitmapAndRender(env, bitmap, [&](uint8_t* pixels, int w, int h) {
+        return session->renderToPixels(pixels, w, h, originX, originY);
+    });
+    return ok ? JNI_TRUE : JNI_FALSE;
+#endif
 }
 
 JNIEXPORT jboolean JNICALL
@@ -2613,6 +2668,7 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeRenderDirtyRectToBitmap(
 ) {
     auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
     if (!session || !bitmap) return JNI_FALSE;
+#ifdef __ANDROID__
     AndroidBitmapInfo info{};
     if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) {
         return JNI_FALSE;
@@ -2635,6 +2691,12 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeRenderDirtyRectToBitmap(
     );
     AndroidBitmap_unlockPixels(env, bitmap);
     return ok ? JNI_TRUE : JNI_FALSE;
+#else
+    bool ok = orgwritenotes::lockDesktopBitmapAndRender(env, bitmap, [&](uint8_t* pixels, int w, int h) {
+        return session->renderDirtyRectToPixels(pixels, w, h, left, top, right, bottom);
+    });
+    return ok ? JNI_TRUE : JNI_FALSE;
+#endif
 }
 
 JNIEXPORT void JNICALL
@@ -3252,6 +3314,506 @@ Java_com_orgwritenotes_ink_WriteNativeBridge_nativeSetTemplateImageOpacity(
 ) {
     auto* session = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
     return (session && session->setTemplateImageOpacity(opacity)) ? JNI_TRUE : JNI_FALSE;
+}
+
+#endif // !ORGWRITENOTES_NO_JNI
+
+// ============================================================================
+// Portable C ABI implementations (iPadOS Kotlin/Native cinterop & Swift ready)
+// ============================================================================
+
+int64_t wn_session_create(int width, int height, int xRuling, int yRuling) {
+    auto* s = new orgwritenotes::NativeCanvasSession(width, height, xRuling, yRuling);
+    return reinterpret_cast<int64_t>(s);
+}
+
+void wn_session_retain(int64_t handle) {
+    if (auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle)) s->retain();
+}
+
+void wn_session_destroy(int64_t handle) {
+    if (auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle)) s->release();
+}
+
+bool wn_session_load_svgz(int64_t handle, const uint8_t* bytes, int length) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && bytes && length > 0 && s->loadSvgzBytes(bytes, static_cast<size_t>(length));
+}
+
+int wn_session_export_svgz(int64_t handle, uint8_t* outBuf, int maxCapacity) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!s) return 0;
+    std::vector<uint8_t> bytes = s->exportSvgzBytes();
+    const int sz = static_cast<int>(bytes.size());
+    if (outBuf && maxCapacity >= sz && sz > 0) {
+        std::memcpy(outBuf, bytes.data(), static_cast<size_t>(sz));
+    }
+    return sz;
+}
+
+bool wn_session_render_rgba(int64_t handle, uint8_t* dstRgba, int width, int height, float originX, float originY) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && dstRgba && s->renderToPixels(dstRgba, width, height, originX, originY);
+}
+
+bool wn_session_render_dirty_rgba(
+    int64_t handle,
+    uint8_t* dstRgba,
+    int width,
+    int height,
+    float left,
+    float top,
+    float right,
+    float bottom
+) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && dstRgba && s->renderDirtyRectToPixels(dstRgba, width, height, left, top, right, bottom);
+}
+
+void wn_session_set_pen(
+    int64_t handle,
+    int colorArgb,
+    float strokeWidth,
+    bool pressureSensitive,
+    int tipType,
+    bool snapToGrid,
+    bool lineDrawing,
+    float chiselAngle
+) {
+    if (auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle)) {
+        s->setPen(colorArgb, strokeWidth, pressureSensitive, tipType, snapToGrid, lineDrawing, chiselAngle);
+    }
+}
+
+void wn_session_begin_stroke(int64_t handle, float x, float y, float pressure, float tiltX, float tiltY, double timestampMs) {
+    if (auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle)) {
+        s->beginStroke(x, y, pressure, tiltX, tiltY, timestampMs);
+    }
+}
+
+void wn_session_move_stroke(int64_t handle, float x, float y, float pressure, float tiltX, float tiltY, double timestampMs) {
+    if (auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle)) {
+        s->moveStroke(x, y, pressure, tiltX, tiltY, timestampMs);
+    }
+}
+
+void wn_session_move_stroke_batch(int64_t handle, const float* pointsData6, int pointCount) {
+    if (auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle)) {
+        if (pointsData6 && pointCount > 0) {
+            s->moveStrokeBatch(pointsData6, pointCount);
+        }
+    }
+}
+
+int wn_session_snap_active_stroke_to_shape(
+    int64_t handle,
+    float* outSnappedPoints,
+    int maxFloats,
+    int* outNumPoints
+) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!s) return 0;
+    return s->snapActiveStrokeToShape(outSnappedPoints, maxFloats, outNumPoints);
+}
+
+void wn_session_end_stroke(int64_t handle, int* outDimsAndDirty6) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!s) return;
+    bool expanded = false;
+    int newH = s->height();
+    float dirty[4] = {0, 0, 0, 0};
+    s->endStroke(&expanded, &newH, dirty);
+    if (outDimsAndDirty6) {
+        outDimsAndDirty6[0] = s->width();
+        outDimsAndDirty6[1] = newH;
+        outDimsAndDirty6[2] = static_cast<int>(std::floor(dirty[0]));
+        outDimsAndDirty6[3] = static_cast<int>(std::floor(dirty[1]));
+        outDimsAndDirty6[4] = static_cast<int>(std::ceil(dirty[2]));
+        outDimsAndDirty6[5] = static_cast<int>(std::ceil(dirty[3]));
+    }
+}
+
+bool wn_session_erase_at(int64_t handle, float x, float y, float radius, float* outDirtyBounds4) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && s->eraseAt(x, y, radius, outDirtyBounds4);
+}
+
+bool wn_session_erase_segment(
+    int64_t handle,
+    float prevX,
+    float prevY,
+    float x,
+    float y,
+    float radius,
+    float* outDirtyBounds4
+) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && s->eraseSegment(prevX, prevY, x, y, radius, outDirtyBounds4);
+}
+
+bool wn_session_erase_ruled_line_at(int64_t handle, float y, float* outDirtyBounds4) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && s->eraseRuledLineAt(y, outDirtyBounds4);
+}
+
+bool wn_session_erase_free_segment(
+    int64_t handle,
+    float prevX,
+    float prevY,
+    float x,
+    float y,
+    float radius,
+    float* outDirtyBounds4
+) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && s->eraseFreeSegment(prevX, prevY, x, y, radius, outDirtyBounds4);
+}
+
+int wn_session_select_rect(int64_t handle, float left, float top, float right, float bottom, float* outBounds4) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s ? s->selectRect(left, top, right, bottom, outBounds4) : 0;
+}
+
+int wn_session_select_lasso(int64_t handle, const float* xyPoints, int numFloats, float* outBounds4) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return (s && xyPoints && numFloats >= 6) ? s->selectLasso(xyPoints, numFloats, outBounds4) : 0;
+}
+
+int wn_session_select_ruled(int64_t handle, float startY, float endY, float* outBounds4) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s ? s->selectRuled(startY, endY, outBounds4) : 0;
+}
+
+int wn_session_select_all(int64_t handle, float* outBounds4) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s ? s->selectAll(outBounds4) : 0;
+}
+
+void wn_session_clear_selection(int64_t handle) {
+    if (auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle)) {
+        s->clearSelection();
+    }
+}
+
+bool wn_session_has_selection(int64_t handle) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && s->hasSelection();
+}
+
+int wn_session_selection_count(int64_t handle) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s ? s->selectionCount() : 0;
+}
+
+bool wn_session_get_selection_bounds(int64_t handle, float* outBounds4) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && outBounds4 && s->getSelectionBounds(outBounds4);
+}
+
+bool wn_session_translate_selection(
+    int64_t handle,
+    float dx,
+    float dy,
+    float* outBounds4,
+    int* outNewDims2
+) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!s) return false;
+    int nw = s->width(), nh = s->height();
+    bool ok = s->translateSelection(dx, dy, outBounds4, &nw, &nh);
+    if (outNewDims2) {
+        outNewDims2[0] = nw;
+        outNewDims2[1] = nh;
+    }
+    return ok;
+}
+
+bool wn_session_scale_selection(
+    int64_t handle,
+    float sx,
+    float sy,
+    float pivotX,
+    float pivotY,
+    bool scaleWidths,
+    float* outBounds4,
+    int* outNewDims2
+) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!s) return false;
+    int nw = s->width(), nh = s->height();
+    bool ok = s->scaleSelection(sx, sy, pivotX, pivotY, scaleWidths, outBounds4, &nw, &nh);
+    if (outNewDims2) {
+        outNewDims2[0] = nw;
+        outNewDims2[1] = nh;
+    }
+    return ok;
+}
+
+bool wn_session_rotate_selection(
+    int64_t handle,
+    float angleRad,
+    float pivotX,
+    float pivotY,
+    float* outBounds4,
+    int* outNewDims2
+) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!s) return false;
+    int nw = s->width(), nh = s->height();
+    bool ok = s->rotateSelection(angleRad, pivotX, pivotY, outBounds4, &nw, &nh);
+    if (outNewDims2) {
+        outNewDims2[0] = nw;
+        outNewDims2[1] = nh;
+    }
+    return ok;
+}
+
+bool wn_session_delete_selection(int64_t handle) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && s->deleteSelection();
+}
+
+int wn_session_duplicate_selection(
+    int64_t handle,
+    float offsetX,
+    float offsetY,
+    float* outBounds4,
+    int* outNewDims2
+) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!s) return 0;
+    int nw = s->width(), nh = s->height();
+    int count = s->duplicateSelection(offsetX, offsetY, outBounds4, &nw, &nh);
+    if (outNewDims2) {
+        outNewDims2[0] = nw;
+        outNewDims2[1] = nh;
+    }
+    return count;
+}
+
+bool wn_session_restyle_selection(int64_t handle, int colorArgb, float strokeWidth) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && s->restyleSelection(colorArgb, strokeWidth);
+}
+
+int wn_session_copy_selection_svg(int64_t handle, char* outBuf, int maxCapacity) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!s) return 0;
+    std::string svg = s->copySelectionSvg();
+    int sz = static_cast<int>(svg.size());
+    if (outBuf && maxCapacity > sz && sz > 0) {
+        std::memcpy(outBuf, svg.data(), static_cast<size_t>(sz));
+        outBuf[sz] = '\0';
+    }
+    return sz;
+}
+
+int wn_session_paste_selection_svg(
+    int64_t handle,
+    const char* svgFragment,
+    float offsetX,
+    float offsetY,
+    float* outBounds4,
+    int* outNewDims2
+) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!s || !svgFragment) return 0;
+    int nw = s->width(), nh = s->height();
+    int count = s->pasteSelectionSvg(std::string(svgFragment), offsetX, offsetY, outBounds4, &nw, &nh);
+    if (outNewDims2) {
+        outNewDims2[0] = nw;
+        outNewDims2[1] = nh;
+    }
+    return count;
+}
+
+bool wn_session_insert_vertical_space(
+    int64_t handle,
+    float yThreshold,
+    float deltaY,
+    bool snapToRuling,
+    int* outNewDims2
+) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!s) return false;
+    int nh = s->height();
+    bool ok = s->insertVerticalSpace(yThreshold, deltaY, snapToRuling, &nh);
+    if (outNewDims2) {
+        outNewDims2[0] = s->width();
+        outNewDims2[1] = nh;
+    }
+    return ok;
+}
+
+bool wn_session_insert_horizontal_space(
+    int64_t handle,
+    float xThreshold,
+    float deltaX,
+    bool snapToRuling,
+    int* outNewDims2
+) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!s) return false;
+    int nw = s->width();
+    bool ok = s->insertHorizontalSpace(xThreshold, deltaX, snapToRuling, &nw);
+    if (outNewDims2) {
+        outNewDims2[0] = nw;
+        outNewDims2[1] = s->height();
+    }
+    return ok;
+}
+
+bool wn_session_insert_ruled_space(
+    int64_t handle,
+    float startX,
+    float startY,
+    float endX,
+    float endY,
+    bool enableReflow,
+    int* outNewDims2
+) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!s) return false;
+    int nw = s->width(), nh = s->height();
+    bool ok = s->insertRuledSpace(startX, startY, endX, endY, enableReflow, &nw, &nh);
+    if (outNewDims2) {
+        outNewDims2[0] = nw;
+        outNewDims2[1] = nh;
+    }
+    return ok;
+}
+
+bool wn_session_resize_canvas(int64_t handle, int newWidth, int newHeight) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && s->resizeCanvas(newWidth, newHeight);
+}
+
+bool wn_session_trim_bottom_whitespace(int64_t handle, int paddingPx, int* outNewDims2) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!s) return false;
+    int nh = s->height();
+    bool ok = s->trimBottomWhitespace(paddingPx, &nh);
+    if (outNewDims2) {
+        outNewDims2[0] = s->width();
+        outNewDims2[1] = nh;
+    }
+    return ok;
+}
+
+bool wn_session_set_page_setup(
+    int64_t handle,
+    int width,
+    int height,
+    int xRuling,
+    int yRuling,
+    int marginLeft,
+    int paperColorArgb,
+    int ruleColorArgb,
+    int rulingStyle,
+    int* outNewDims4
+) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!s || !s->setPageSetup(width, height, xRuling, yRuling, marginLeft, paperColorArgb, ruleColorArgb, rulingStyle)) {
+        return false;
+    }
+    if (outNewDims4) {
+        outNewDims4[0] = s->width();
+        outNewDims4[1] = s->height();
+        outNewDims4[2] = s->xRuling();
+        outNewDims4[3] = s->yRuling();
+    }
+    return true;
+}
+
+bool wn_session_get_page_info(int64_t handle, int* outInfo8) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!s || !outInfo8) return false;
+    outInfo8[0] = s->width();
+    outInfo8[1] = s->height();
+    outInfo8[2] = s->xRuling();
+    outInfo8[3] = s->yRuling();
+    outInfo8[4] = s->marginLeft();
+    outInfo8[5] = s->paperColorArgb();
+    outInfo8[6] = s->ruleColorArgb();
+    outInfo8[7] = s->rulingStyle();
+    return true;
+}
+
+bool wn_session_lock_content_as_template(int64_t handle) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && s->lockContentAsTemplate();
+}
+
+bool wn_session_unlock_template_to_content(int64_t handle) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && s->unlockTemplateToContent();
+}
+
+bool wn_session_clear_custom_template(int64_t handle) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && s->clearCustomTemplate();
+}
+
+bool wn_session_has_custom_template_nodes(int64_t handle) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && s->hasCustomTemplateNodes();
+}
+
+bool wn_session_insert_image_bytes(
+    int64_t handle,
+    const uint8_t* bytes,
+    int length,
+    bool asBackground,
+    float* outBounds4
+) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && bytes && length > 0 && s->insertImageBytes(bytes, static_cast<size_t>(length), asBackground, outBounds4);
+}
+
+bool wn_session_set_template_image_opacity(int64_t handle, float opacity) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && s->setTemplateImageOpacity(opacity);
+}
+
+void wn_session_set_render_theme(int64_t handle, bool isDark, uint32_t darkBgArgb, uint32_t darkFgArgb) {
+    if (auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle)) {
+        s->setRenderTheme(isDark, darkBgArgb, darkFgArgb);
+    }
+}
+
+bool wn_session_undo(int64_t handle, int* outNewDims2) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!s || !s->undo()) return false;
+    if (outNewDims2) {
+        outNewDims2[0] = s->width();
+        outNewDims2[1] = s->height();
+    }
+    return true;
+}
+
+bool wn_session_redo(int64_t handle, int* outNewDims2) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    if (!s || !s->redo()) return false;
+    if (outNewDims2) {
+        outNewDims2[0] = s->width();
+        outNewDims2[1] = s->height();
+    }
+    return true;
+}
+
+bool wn_session_can_undo(int64_t handle) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && s->canUndo();
+}
+
+bool wn_session_can_redo(int64_t handle) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s && s->canRedo();
+}
+
+int wn_session_stroke_count(int64_t handle) {
+    auto* s = reinterpret_cast<orgwritenotes::NativeCanvasSession*>(handle);
+    return s ? s->strokeCount() : 0;
 }
 
 } // extern "C"

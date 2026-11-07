@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Org-WriteNotes
+GenericName=Org-mode Stylus Handwriting Companion
+Comment=Stylus Labs Write C++ vector ink companion for GNU Emacs Org-mode
+Exec=org-writenotes-linux %F
+Icon=accessories-text-editor
+Terminal=false
+Categories=Office;TextEditor;Graphics;VectorGraphics;
+MimeType=image/svg+xml;image/svg+xml-compressed;x-scheme-handler/org-writenotes;
+Keywords=org-mode;emacs;stylus;wacom;handwriting;svgz;notes;
+StartupWMClass=com-orgwritenotes-LinuxMainKt
+

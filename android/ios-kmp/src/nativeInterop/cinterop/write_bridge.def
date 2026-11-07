@@ -1,0 +1,7 @@
+headers = write_bridge_c_api.h
+headerFilter = write_bridge_c_api.h
+package = com.orgwritenotes.ink.cinterop
+compilerOpts = -DORGWRITENOTES_NO_JNI=1
+linkerOpts.ios = -lz -lc++
+staticLibraries = liborgwritenotes_c_static.a
+

@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# org-writenotes-linux — Launcher for Org-WriteNotes on Linux (X11 & Wayland)
+# Supports:
+#   1. Full Companion App Mode:  ./linux/org-writenotes-linux
+#   2. Single-Sketch Popup Mode: ./linux/org-writenotes-linux --sketch /path/to/sketch.svgz
+#   3. Device Diagnostic Mode:   ./linux/org-writenotes-linux --devices
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+NATIVE_BUILD_DIR="$SCRIPT_DIR/build-native"
+
+if [[ -z "${JAVA_HOME:-}" ]]; then
+    if [[ -x "/home/saisan/.android-sdk/jdk-17/bin/java" ]]; then
+        export JAVA_HOME="/home/saisan/.android-sdk/jdk-17"
+    elif [[ -d "/usr/lib/jvm/java-17-openjdk-amd64" ]]; then
+        export JAVA_HOME="/usr/lib/jvm/java-17-openjdk-amd64"
+    elif [[ -d "/usr/lib/jvm/java-17-openjdk" ]]; then
+        export JAVA_HOME="/usr/lib/jvm/java-17-openjdk"
+    fi
+fi
+
+if [[ -n "${JAVA_HOME:-}" ]]; then
+    export PATH="$JAVA_HOME/bin:$PATH"
+fi
+
+if [[ -x "/home/saisan/.android-sdk/gradle-8.6/bin/gradle" ]]; then
+    GRADLE_CMD="/home/saisan/.android-sdk/gradle-8.6/bin/gradle"
+elif [[ -x "$ROOT_DIR/android/gradlew" ]]; then
+    GRADLE_CMD="$ROOT_DIR/android/gradlew"
+else
+    GRADLE_CMD="gradle"
+fi
+
+# 1. Ensure native C++ Write engine + Linux stylus JNI library is compiled
+if [[ ! -f "$NATIVE_BUILD_DIR/liborgwritenotes_jni.so" ]]; then
+    CMAKE_BIN="cmake"
+    if [[ -x "/home/saisan/.android-sdk/cmake/3.22.1/bin/cmake" ]]; then
+        CMAKE_BIN="/home/saisan/.android-sdk/cmake/3.22.1/bin/cmake"
+    fi
+    echo "[Org-WriteNotes] Building native Linux C++ engine (liborgwritenotes_jni.so)..." >&2
+    "$CMAKE_BIN" -S "$ROOT_DIR/android/app/src/main/cpp" -B "$NATIVE_BUILD_DIR" -DCMAKE_BUILD_TYPE=Release >&2
+    "$CMAKE_BIN" --build "$NATIVE_BUILD_DIR" -j4 >&2
+fi
+
+export LD_LIBRARY_PATH="$NATIVE_BUILD_DIR:${LD_LIBRARY_PATH:-}"
+
+# 2. If a packaged distribution binary exists, launch it directly for instant startup
+DIST_BIN="$ROOT_DIR/android/desktop/build/compose/binaries/main/app/org-writenotes/bin/org-writenotes"
+if [[ -x "$DIST_BIN" && "${ORG_WRITENOTES_FORCE_GRADLE:-0}" != "1" ]]; then
+    exec "$DIST_BIN" "$@"
+fi
+
+# 3. Otherwise launch via Gradle :desktop:run passing CLI arguments
+cd "$ROOT_DIR/android"
+GRADLE_RUN_ARGS=(:desktop:run --quiet -Dorg.gradle.jvmargs="-Xmx2g")
+if [[ $# -gt 0 ]]; then
+    GRADLE_RUN_ARGS+=(--args="$*")
+fi
+exec "$GRADLE_CMD" "${GRADLE_RUN_ARGS[@]}"
+

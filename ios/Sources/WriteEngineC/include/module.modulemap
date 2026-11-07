@@ -1,0 +1,5 @@
+module WriteEngineC {
+    header "write_bridge_c_api.h"
+    export *
+}
+

@@ -1,7 +1,10 @@
 #ifndef WRITE_BRIDGE_JNI_H
 #define WRITE_BRIDGE_JNI_H
 
+#if !defined(ORGWRITENOTES_NO_JNI) && (!defined(__APPLE__) || defined(ORGWRITENOTES_ENABLE_JNI))
 #include <jni.h>
+#endif
+#include "write_bridge_c_api.h"
 #include <cstdint>
 #include <string>
 #include <vector>

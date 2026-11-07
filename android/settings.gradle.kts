@@ -3,6 +3,7 @@ pluginManagement {
         google()
         mavenCentral()
         gradlePluginPortal()
+        maven("https://maven.pkg.jetbrains.space/public/p/compose/dev")
     }
 }
 
@@ -11,11 +12,12 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        maven("https://maven.pkg.jetbrains.space/public/p/compose/dev")
         // Also hosts the SDK's transitive third-party deps (mmkv, easypermissions, hugo, ...).
         maven { url = uri("https://repo.boox.com/repository/maven-public/") }
     }
 }
 
 rootProject.name = "OrgWriteNotes"
-include(":app")
+include(":app", ":desktop")
 

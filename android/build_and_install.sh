@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="/home/saisan/.vim/emacs_plugin/org-writenotes"
-SDK_DIR="/home/saisan/.android-sdk"
-ANDROID_DIR="$ROOT_DIR/android"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SDK_DIR="${ANDROID_SDK_ROOT:-/home/saisan/.android-sdk}"
+ANDROID_DIR="$SCRIPT_DIR"
 
 echo "sdk.dir=$SDK_DIR" > "$ANDROID_DIR/local.properties"
 

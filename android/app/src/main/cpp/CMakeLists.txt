@@ -52,34 +52,76 @@ add_compile_definitions(
     SCRIBBLE_REV_NUMBER="orgwritenotes"
 )
 
+# Pure C-ABI static library for iPadOS (Swift / XCFramework / Kotlin Native cinterop)
 add_library(
-    orgwritenotes_jni
-    SHARED
+    orgwritenotes_c_static
+    STATIC
     write_bridge_jni.cpp
     ${WRITE_CORE_SOURCES}
 )
-
+target_compile_definitions(orgwritenotes_c_static PRIVATE ORGWRITENOTES_NO_JNI=1)
 target_compile_options(
-    orgwritenotes_jni
+    orgwritenotes_c_static
     PRIVATE
     -O3
     -DNDEBUG
     -ffast-math
     -fno-math-errno
     -funroll-loops
+    -fPIC
 )
 
-if(ANDROID)
-    find_library(log-lib log)
-    find_library(android-lib android)
-    find_library(jnigraphics-lib jnigraphics)
-    find_library(gles3-lib GLESv3)
-
-    target_link_libraries(
+if(NOT IOS AND NOT ORGWRITENOTES_NO_JNI)
+    add_library(
         orgwritenotes_jni
-        ${log-lib}
-        ${android-lib}
-        ${jnigraphics-lib}
-        ${gles3-lib}
+        SHARED
+        write_bridge_jni.cpp
+        linux_stylus_input.cpp
+        ${WRITE_CORE_SOURCES}
     )
+
+    target_compile_options(
+        orgwritenotes_jni
+        PRIVATE
+        -O3
+        -DNDEBUG
+        -ffast-math
+        -fno-math-errno
+        -funroll-loops
+    )
+
+    if(ANDROID)
+        find_library(log-lib log)
+        find_library(android-lib android)
+        find_library(jnigraphics-lib jnigraphics)
+        find_library(gles3-lib GLESv3)
+
+        target_link_libraries(
+            orgwritenotes_jni
+            ${log-lib}
+            ${android-lib}
+            ${jnigraphics-lib}
+            ${gles3-lib}
+        )
+    else()
+        find_package(Threads REQUIRED)
+        if(DEFINED ENV{JAVA_HOME})
+            target_include_directories(
+                orgwritenotes_jni
+                PRIVATE
+                "$ENV{JAVA_HOME}/include"
+                "$ENV{JAVA_HOME}/include/linux"
+                "$ENV{JAVA_HOME}/include/darwin"
+            )
+        else()
+            find_package(JNI REQUIRED)
+            target_include_directories(orgwritenotes_jni PRIVATE ${JNI_INCLUDE_DIRS})
+        endif()
+        target_link_libraries(
+            orgwritenotes_jni
+            PRIVATE
+            Threads::Threads
+            ${CMAKE_DL_LIBS}
+        )
+    endif()
 endif()
