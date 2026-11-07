@@ -51,6 +51,23 @@ Core vector ink rendering and manipulation across all clients is powered by the 
   ./build_ipa.sh
   ```
 
+### 4. Jailbroken Kindle Scribe App — Scriptlets & KPM (`kindle/`)
+- **Technology:** Native C++17 (`org-writenotes-kindle`), static `WriteEngineC` CPU software rasterizer, direct Linux `/dev/fb0` + `mxcfb` EPDC ioctls, and raw Wacom EMR `/dev/input/event*` (`evdev`).
+- **Features:**
+  - **Kindle Home Library Scriptlets (`sh_integration`):** Places `Org-WriteNotes.sh` (`# DontUseFBInk`) and `Org-WriteNotes-Sync.sh` directly in `/mnt/us/documents/` so they appear as 1-tap book items right on your Kindle Scribe Home screen without needing KUAL.
+  - **KPM (Kindle Package Manager) Package (`org-writenotes.kpkg`):** Includes `manifest.json` (`kindlehf`), `install.sh`, `uninstall.sh`, and `launch.sh`.
+  - Zero-flash `WAVEFORM_MODE_DU` (~15 ms) active pen trace with `WAVEFORM_MODE_GC16_FAST` 16-level anti-aliased grayscale settle on pen-up.
+  - Hardware proximity (`BTN_TOOL_PEN` / `BTN_TOOL_RUBBER`) + 700 ms temporal palm rejection.
+  - WebSocket JSON-RPC 2.0 sync over Wi-Fi, Tailscale, or USBnet (`192.168.15.201`) with persistent offline commit queue (`/mnt/us/org-writenotes/queue/`).
+- **Building & Installing on Scribe:**
+  ```bash
+  ./kindle/build_kual.sh
+  # Option A: Extract directly onto /mnt/us (places binary in /mnt/us/org-writenotes/ and Scriptlets in /mnt/us/documents/):
+  tar -xzf kindle/dist/org-writenotes-kindle-scribe.tar.gz -C /mnt/us/
+  # Option B: Install via KPM (.kpkg):
+  # Copy kindle/dist/org-writenotes.kpkg to your Kindle and run kpm install
+  ```
+
 ---
 
 ## CI/CD & Automated Releases
@@ -62,9 +79,10 @@ The multi-platform GitHub Actions workflow (`.github/workflows/ci.yml`) compiles
 | **Android Tablet / E-Ink** | `org-writenotes-android.apk`, `app-debug.apk` | `ubuntu-latest` |
 | **Linux Desktop (X11/Wayland)** | `org-writenotes_*.deb`, `org-writenotes-linux-x86_64.tar.gz` | `ubuntu-latest` |
 | **iPadOS** | `OrgWriteNotes-iPadOS.ipa` | `macos-15` |
+| **Kindle Scribe (KPM & Scriptlets)** | `org-writenotes.kpkg`, `org-writenotes-kindle-scribe.tar.gz` | `ubuntu-latest` |
 
 - **CI Artifacts:** Available on every push and PR to `main` under GitHub Actions run artifacts.
-- **GitHub Releases:** Tagging a release (e.g. `git tag v0.1.0 && git push --tags`) or publishing a GitHub Release automatically packages and attaches all three platform binaries (`.ipa`, `.apk`, `.deb`, `.tar.gz`) to the release.
+- **GitHub Releases:** Tagging a release (e.g. `git tag v0.1.0 && git push --tags`) or publishing a GitHub Release automatically packages and attaches all four platform binaries (`.ipa`, `.apk`, `.deb`, `.tar.gz`) to the release.
 
 
 ---

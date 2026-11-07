@@ -152,9 +152,40 @@ jobs:
           name: ipados-ipa
           path: dist/ios/OrgWriteNotes-iPadOS.ipa
 
+  kindle-scribe-build:
+    name: Build Kindle Scribe KPM Package (.kpkg & .tar.gz)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install ARM Cross-Compiler Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf binutils-arm-linux-gnueabihf
+
+      - name: Build, Run Unit & Golden Protocol Tests, and Package KPM Bundle
+        run: |
+          chmod +x kindle/build_kual.sh kindle/kual/run.sh kindle/kpm/*.sh
+          ./kindle/build_kual.sh
+
+      - name: Stage Kindle Scribe Artifacts
+        run: |
+          mkdir -p dist/kindle
+          cp kindle/dist/org-writenotes.kpkg dist/kindle/
+          cp kindle/dist/org-writenotes-kindle-scribe.tar.gz dist/kindle/
+          ls -lh dist/kindle/
+
+      - name: Upload Kindle Scribe KPM Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: kindle-scribe-kpm
+          path: dist/kindle/*
+
   publish-release:
     name: Publish Release Assets to GitHub Releases
-    needs: [ android-build, linux-build, ipados-build ]
+    needs: [ android-build, linux-build, ipados-build, kindle-scribe-build ]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release' || github.event.inputs.publish_release == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -168,7 +199,7 @@ jobs:
       - name: Consolidate Release Binaries
         run: |
           mkdir -p release-assets
-          find downloaded-artifacts -type f \( -name "*.apk" -o -name "*.deb" -o -name "*.tar.gz" -o -name "*.ipa" \) -exec cp {} release-assets/ \;
+          find downloaded-artifacts -type f \( -name "*.apk" -o -name "*.deb" -o -name "*.tar.gz" -o -name "*.ipa" -o -name "*.kpkg" \) -exec cp {} release-assets/ \;
           echo "=== Consolidated Release Assets ==="
           ls -lh release-assets/
 

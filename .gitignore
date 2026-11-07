@@ -13,8 +13,11 @@ android/hs_err_pid*.log
 android/replay_pid*.log
 *.log
 
-# Linux native
+# Linux & Kindle Scribe native builds
 linux/build-native/
+kindle/build-host/
+kindle/build-armhf/
+kindle/dist/
 
 # iOS / Swift
 ios/build/

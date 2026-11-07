@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<extension>
+    <information>
+        <name>Org-WriteNotes</name>
+        <version>0.2.0</version>
+        <author>Org-WriteNotes</author>
+        <id>org-writenotes-scribe</id>
+    </information>
+    <menus>
+        <menu type="json" dynamic="true">menu.json</menu>
+    </menus>
+</extension>
+

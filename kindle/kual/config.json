@@ -1,0 +1,8 @@
+{
+    "v": 2,
+    "host": "192.168.15.201",
+    "port": 9876,
+    "path": "/org-writenotes",
+    "token": "replace-with-org-writenotes-session-token"
+}
+

@@ -1,0 +1,14 @@
+{
+    "id": "org-writenotes",
+    "name": "Org-WriteNotes Companion",
+    "author": "Org-WriteNotes",
+    "version": "0.2.0",
+    "description": "Low-latency Wacom EMR vector ink companion for GNU Emacs Org-mode on Kindle Scribe",
+    "dependencies": [],
+    "supported_platforms": [
+        "kindlehf",
+        "kindlepw2",
+        "kindle5"
+    ]
+}
+

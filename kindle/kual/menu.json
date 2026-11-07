@@ -1,0 +1,39 @@
+{
+    "items": [
+        {
+            "name": "Org-WriteNotes (Kindle Scribe)",
+            "priority": 1,
+            "items": [
+                {
+                    "name": "Launch Org-WriteNotes Canvas",
+                    "priority": 1,
+                    "action": "./run.sh",
+                    "params": "launch",
+                    "exitmenu": true
+                },
+                {
+                    "name": "Launch Canvas (Landscape 90°)",
+                    "priority": 2,
+                    "action": "./run.sh",
+                    "params": "launch-landscape",
+                    "exitmenu": true
+                },
+                {
+                    "name": "Sync Offline Queue to Emacs Now",
+                    "priority": 3,
+                    "action": "./run.sh",
+                    "params": "sync",
+                    "exitmenu": false
+                },
+                {
+                    "name": "Full E-Ink Ghosting Refresh (GC16)",
+                    "priority": 4,
+                    "action": "./run.sh",
+                    "params": "refresh",
+                    "exitmenu": false
+                }
+            ]
+        }
+    ]
+}
+
