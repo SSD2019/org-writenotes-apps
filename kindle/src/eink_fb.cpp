@@ -489,6 +489,27 @@ void EinkFramebuffer::drawThickLine(float x0, float y0, float x1, float y1, floa
     }
 }
 
+void EinkFramebuffer::drawCircle(int cx, int cy, int radius, uint8_t grayLevel, bool filled, int thickness) {
+    if (!m_fbPtr || radius <= 0) return;
+    const int minX = std::max(0, cx - radius);
+    const int maxX = std::min(m_width - 1, cx + radius);
+    const int minY = std::max(0, cy - radius);
+    const int maxY = std::min(m_height - 1, cy + radius);
+    const int outerSq = radius * radius;
+    const int innerR = std::max(0, radius - std::max(1, thickness));
+    const int innerSq = innerR * innerR;
+    for (int py = minY; py <= maxY; ++py) {
+        int dy = py - cy;
+        for (int px = minX; px <= maxX; ++px) {
+            int dx = px - cx;
+            int dSq = dx * dx + dy * dy;
+            if (dSq <= outerSq && (filled || dSq >= innerSq)) {
+                setPixelGray(px, py, grayLevel);
+            }
+        }
+    }
+}
+
 void EinkFramebuffer::drawText(int x, int y, const std::string& text, uint8_t fgGray, uint8_t bgGray, int scale) {
     if (!m_fbPtr || scale <= 0) return;
     int cursorX = x;

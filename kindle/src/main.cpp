@@ -204,9 +204,10 @@ int main(int argc, char** argv) {
     app.renderFullScreen(/*fullFlash=*/!synced);
 
     app.setDeferAutoCommit(true);
+    app.startAsyncSyncWorker();
 
     std::printf(
-        "[Kindle-Scribe] Running on %dx%d E-Ink display (%d input devices, connected=%s, host=%s). Tap [Exit] or Ctrl+C to quit.\n",
+        "[Kindle-Scribe] Running on %dx%d E-Ink display (%d input devices, connected=%s, host=%s). Tap [+] -> Exit or Ctrl+C to quit.\n",
         app.framebuffer().width(),
         app.framebuffer().height(),
         devCount,
@@ -217,8 +218,8 @@ int main(int argc, char** argv) {
     std::vector<ScribeInputEvent> events;
     events.reserve(64);
     int idlePolls = 0;
-    int startupTicks = 0;
     while (!g_stopRequested && !app.shouldExit()) {
+        app.processAsyncSyncResults();
         events.clear();
         int n = app.input().pollEvents(events, 16);
         if (n > 0) {
@@ -228,26 +229,25 @@ int main(int argc, char** argv) {
             }
         } else {
             ++idlePolls;
-            if (startupTicks < 200) {
-                ++startupTicks;
-                // Guard against late com.lab126.webview Wi-Fi registration postAppFlash overwrites
-                if ((startupTicks == 60 || startupTicks == 150) && !app.isStrokeActive()) {
-                    app.renderFullScreen(/*fullFlash=*/false);
-                }
+            // Coalesce pen-up GC16_FAST settle once stylus leaves proximity or ~400ms idle
+            if (app.hasPendingStrokeSettle() && !app.isStrokeActive()) {
+                app.flushPendingStrokeSettle(/*force=*/!app.input().isStylusInProximity());
             }
-            if ((idlePolls % 10) == 0 && !app.isStrokeActive()) {
-                app.pollServerNotifications();
+            if ((idlePolls % 15) == 0 && !app.isStrokeActive()) {
+                app.queueAsyncPollNotifications();
             }
             if (idlePolls >= 120 &&
                 app.hasPendingCommit() &&
                 !app.isStrokeActive() &&
                 !app.input().isStylusInProximity()) {
-                app.flushPendingCommit();
+                app.queueAsyncCommitCurrent();
                 idlePolls = 0;
             }
         }
     }
 
+    app.stopAsyncSyncWorker();
+    app.flushPendingStrokeSettle(/*force=*/true);
     app.flushPendingCommit();
     std::printf("[Kindle-Scribe] Exiting cleanly.\n");
     return 0;

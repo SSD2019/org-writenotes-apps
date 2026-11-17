@@ -105,6 +105,7 @@ fun WriteSharedToolbarChrome(
     onDeleteSelection: (() -> Unit)? = null,
     isDarkCanvasTheme: Boolean = false,
     onToggleDarkCanvasTheme: (() -> Unit)? = null,
+    connectionState: com.orgwritenotes.sync.ConnectionState? = null,
     onUserInteracted: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -171,6 +172,11 @@ fun WriteSharedToolbarChrome(
                     }
                 }
                 Spacer(modifier = Modifier.width(4.dp))
+            }
+
+            if (isZoomedFullScreen && connectionState != null) {
+                ConnectionDot(state = connectionState, size = 10.dp)
+                Spacer(modifier = Modifier.width(6.dp))
             }
 
             // Active Drawing Title Badge

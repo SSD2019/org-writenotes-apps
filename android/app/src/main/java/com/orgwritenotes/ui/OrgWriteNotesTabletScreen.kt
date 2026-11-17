@@ -503,7 +503,7 @@ fun connectionDotColor(state: ConnectionState): Color {
         ConnectionState.CONNECTED_NETWORK -> Color(0xFF38BDF8)
         ConnectionState.OFFLINE_CACHED -> Color(0xFFF59E0B)
         ConnectionState.CONNECTING -> Color(0xFFFACC15)
-        ConnectionState.ERROR -> Color(0xFFEF4444)
-        ConnectionState.DISCONNECTED -> Color(0xFF94A3B8)
+        ConnectionState.ERROR -> Color(0xFFB91C1C)
+        ConnectionState.DISCONNECTED -> Color(0xFFEF4444)
     }
 }

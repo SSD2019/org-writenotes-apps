@@ -69,7 +69,7 @@ public struct IPadMainWorkspaceView: View {
                 Section("Connection") {
                     HStack {
                         Circle()
-                            .fill(syncClient.state == .connected ? Color.green : Color.orange)
+                            .fill(syncClient.state == .connected ? Color.green : (syncClient.state == .connecting ? Color.orange : Color.red))
                             .frame(width: 10, height: 10)
                         Text(syncClient.statusMessage)
                             .font(.caption)
@@ -158,6 +158,14 @@ public struct IPadMainWorkspaceView: View {
     private var pencilToolbar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 12) {
+                Button(action: { showConnectSheet = true }) {
+                    Circle()
+                        .fill(syncClient.state == .connected ? Color.green : (syncClient.state == .connecting ? Color.orange : Color.red))
+                        .frame(width: 10, height: 10)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(syncClient.state == .connected ? "Connected" : "Disconnected")
+
                 Group {
                     Button(action: { toolMode = .pen }) {
                         Label("Pen", systemImage: "pencil.tip")

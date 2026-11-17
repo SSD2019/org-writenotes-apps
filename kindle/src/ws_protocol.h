@@ -14,6 +14,7 @@ struct OrgNodeSummary {
     std::string title;
     std::string todoKeyword;
     std::string scheduled;
+    std::string agendaLabel;
     int level       = 1;
     int sketchCount = 0;
 };
@@ -80,6 +81,12 @@ std::string buildAgendaListJson(int id, const std::string& span = "week");
 std::string buildInkGetJson(int id, const std::string& nodeId, const std::string& fileName);
 std::string buildInkCommitJson(int id, const InkCommitPayload& payload);
 std::string buildFlagFlashcardJson(int id, const std::string& nodeId, const std::string& fileName, bool flagged);
+std::string buildNodeUpdateHeaderJson(
+    int id,
+    const std::string& nodeId,
+    const std::string& todoKeyword,
+    const std::string& priority = ""
+);
 
 // Lightweight JSON extractors for golden fixture & server responses
 std::string extractJsonStringField(const std::string& json, const std::string& key);
@@ -114,6 +121,12 @@ public:
         int yRuling,
         OrgNodeSnapshotData* outSnapshot
     );
+    bool updateNodeHeader(
+        const std::string& nodeId,
+        const std::string& todoKeyword,
+        const std::string& priority = ""
+    );
+    bool flagFlashcard(const std::string& nodeId, const std::string& fileName, bool flagged);
 
     // Polls for unsolicited server push notifications (emacs.focusNode, emacs.nodeModified, emacs.zoomInkBlock)
     bool pollServerNotification(std::string* outMethod, std::string* outParamsJson, int timeoutMs = 0);

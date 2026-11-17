@@ -44,6 +44,7 @@ fun WriteZoomedEditorOverlay(
 ) {
     val isEInk = OnyxEInkBridge.isEInkDevice
     var canvasViewRef by remember(block.blockId) { mutableStateOf<WriteCanvasBlockView?>(null) }
+    val connectionState by syncClient.connectionState.collectAsState()
     val emacsTheme by syncClient.emacsTheme.collectAsState()
     val effectiveDark = if (isEInk) false else emacsTheme.isDark
     val bgArgb = remember(emacsTheme) { emacsTheme.resolvedDarkBgArgb() }
@@ -251,7 +252,8 @@ fun WriteZoomedEditorOverlay(
                 onOpenPageSetup = { showPageSetupDialog = true },
                 onDeleteImage = { showDeleteConfirmDialog = true },
                 isDarkCanvasTheme = effectiveDark,
-                onToggleDarkCanvasTheme = if (isEInk) null else ({ syncClient.toggleCanvasDarkMode() })
+                onToggleDarkCanvasTheme = if (isEInk) null else ({ syncClient.toggleCanvasDarkMode() }),
+                connectionState = connectionState
             )
         }
         if (dock == ToolbarDock.TOP) toolbar()

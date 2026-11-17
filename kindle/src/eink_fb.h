@@ -75,6 +75,7 @@ public:
     void fillRect(int x, int y, int w, int h, uint8_t grayLevel);
     void drawRectBorder(int x, int y, int w, int h, int thickness, uint8_t grayLevel);
     void drawHLine(int x, int y, int w, uint8_t grayLevel);
+    void drawCircle(int cx, int cy, int radius, uint8_t grayLevel, bool filled = true, int thickness = 2);
     void drawText(int x, int y, const std::string& text, uint8_t fgGray, uint8_t bgGray, int scale = 2);
     void drawThickLine(float x0, float y0, float x1, float y1, float radius, uint8_t grayLevel);
 

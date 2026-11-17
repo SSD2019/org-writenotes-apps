@@ -205,22 +205,26 @@ void testEinkWaveformsAndAppWorkflow() {
     ASSERT_TRUE(app.strokeCount() == 1, "Expected 1 stroke on canvas");
 
     const auto& history = app.framebuffer().updateHistory();
-    ASSERT_TRUE(history.size() >= 2, "Expected DU move update + GC16_FAST pen-up settle update");
+    ASSERT_TRUE(!history.empty(), "Expected DU move update");
     ASSERT_TRUE(history[0].waveform == EinkWaveform::DU, "Active stroke move must use fast DU waveform");
-    ASSERT_TRUE(history.back().waveform == EinkWaveform::GC16_FAST, "Stroke end must settle with GC16_FAST waveform");
+    ASSERT_TRUE(app.hasPendingStrokeSettle(), "Stroke end should defer GC16_FAST settle");
+
+    app.flushPendingStrokeSettle(/*force=*/true);
+    ASSERT_TRUE(!app.hasPendingStrokeSettle(), "Pending settle should be cleared after flush");
+    ASSERT_TRUE(history.back().waveform == EinkWaveform::GC16_FAST, "Deferred settle must use GC16_FAST waveform");
 
     // Offline commit queue should have recorded the stroke automatically
     ASSERT_TRUE(app.syncClient().pendingQueueCount() == 1, "Expected 1 queued offline commit after stroke");
 
-    // Tap Undo button on top toolbar (button index 3 of 7)
-    float undoX = (3.5f / 7.0f) * static_cast<float>(app.framebuffer().width());
+    // Tap Undo button on compact floating pill (x = kPillX + 50 + 96 + 39 = 197, y = 30)
+    float undoX = static_cast<float>(KindleScribeApp::kPillX + 50 + 96 + 39);
     app.handleInputEvent({ ScribeToolType::FINGER, ScribeEventAction::DOWN, undoX, 30.0f, 0.5f, 0.0f, 0.0f, false, 2000.0 });
-    ASSERT_TRUE(app.strokeCount() == 0, "Expected 0 strokes after Undo toolbar tap");
+    ASSERT_TRUE(app.strokeCount() == 0, "Expected 0 strokes after Undo pill tap");
 
-    // Tap Redo button on top toolbar (button index 4 of 7)
-    float redoX = (4.5f / 7.0f) * static_cast<float>(app.framebuffer().width());
+    // Tap Redo button on compact floating pill (x = kPillX + 50 + 96 + 78 + 39 = 275, y = 30)
+    float redoX = static_cast<float>(KindleScribeApp::kPillX + 50 + 96 + 78 + 39);
     app.handleInputEvent({ ScribeToolType::FINGER, ScribeEventAction::DOWN, redoX, 30.0f, 0.5f, 0.0f, 0.0f, false, 2100.0 });
-    ASSERT_TRUE(app.strokeCount() == 1, "Expected 1 stroke after Redo toolbar tap");
+    ASSERT_TRUE(app.strokeCount() == 1, "Expected 1 stroke after Redo pill tap");
 
     app.syncClient().clearOfflineQueue();
     std::printf("  [PASS] testEinkWaveformsAndAppWorkflow\n");
@@ -312,6 +316,122 @@ void testServerSnapshotSyncAndUniformCanvasScaling() {
     std::printf("  [PASS] testServerSnapshotSyncAndUniformCanvasScaling\n");
 }
 
+void testCollapsibleToolbarSelectionAndTier1Features() {
+    std::string testQueueDir = "/tmp/org-writenotes-kindle-test-queue-tier1";
+    KindleScribeApp app("", testQueueDir, 930, 1240);
+    app.syncClient().clearOfflineQueue();
+    ASSERT_TRUE(app.initialize(), "Failed to initialize KindleScribeApp");
+    ASSERT_TRUE(!app.isToolbarExpanded(), "Toolbar should start collapsed");
+    ASSERT_TRUE(!app.isCanvasDirty(), "Canvas cache should be clean after initialize");
+
+    // 1. Expand floating pill [+] -> verify canvas cache stays clean (no CPU re-render)
+    app.handleInputEvent({ ScribeToolType::FINGER, ScribeEventAction::DOWN,
+        static_cast<float>(KindleScribeApp::kPillX + 25), 30.0f, 0.5f, 0.0f, 0.0f, false, 100.0 });
+    ASSERT_TRUE(app.isToolbarExpanded(), "Toolbar should expand on [+] tap");
+    ASSERT_TRUE(!app.isCanvasDirty(), "Expanding toolbar must not invalidate canvas cache");
+
+    // 2. Open Tools popover from expanded strip (button 0 of 6)
+    app.handleInputEvent({ ScribeToolType::FINGER, ScribeEventAction::DOWN,
+        static_cast<float>(KindleScribeApp::kPillX + 40), static_cast<float>(KindleScribeApp::kStripY + 20),
+        0.5f, 0.0f, 0.0f, false, 150.0 });
+    ASSERT_TRUE(app.activePopover() == PopoverKind::TOOLS, "Tools popover should open");
+    ASSERT_TRUE(!app.isCanvasDirty(), "Opening Tools popover must not invalidate canvas cache");
+
+    // 3. Draw on canvas -> overlays must auto-collapse and stroke must be recorded
+    app.handleInputEvent({ ScribeToolType::PEN, ScribeEventAction::DOWN, 200.0f, 400.0f, 0.6f, 0.0f, 0.0f, false, 200.0 });
+    ASSERT_TRUE(!app.isToolbarExpanded(), "Canvas tap must auto-collapse toolbar");
+    ASSERT_TRUE(app.activePopover() == PopoverKind::NONE, "Canvas tap must auto-close popover");
+    app.handleInputEvent({ ScribeToolType::PEN, ScribeEventAction::MOVE, 350.0f, 480.0f, 0.7f, 0.0f, 0.0f, false, 216.0 });
+    app.handleInputEvent({ ScribeToolType::PEN, ScribeEventAction::UP,   350.0f, 480.0f, 0.0f, 0.0f, 0.0f, false, 232.0 });
+    ASSERT_TRUE(app.strokeCount() == 1, "Expected 1 stroke after auto-collapse stroke");
+
+    // 4. Select Rect via Tools popover (row 2, col 0 -> S:Rect) and duplicate the stroke
+    app.handleInputEvent({ ScribeToolType::FINGER, ScribeEventAction::DOWN,
+        static_cast<float>(KindleScribeApp::kPillX + 25), 30.0f, 0.5f, 0.0f, 0.0f, false, 300.0 });
+    app.handleInputEvent({ ScribeToolType::FINGER, ScribeEventAction::DOWN,
+        static_cast<float>(KindleScribeApp::kPillX + 40), static_cast<float>(KindleScribeApp::kStripY + 20),
+        0.5f, 0.0f, 0.0f, false, 320.0 });
+    app.handleInputEvent({ ScribeToolType::FINGER, ScribeEventAction::DOWN,
+        static_cast<float>(KindleScribeApp::kPillX + 30), static_cast<float>(KindleScribeApp::kPopoverY + 140),
+        0.5f, 0.0f, 0.0f, false, 340.0 });
+    ASSERT_TRUE(app.activeTool() == ActiveTool::SELECT, "Expected SELECT tool active");
+
+    // Drag rect around stroke
+    app.handleInputEvent({ ScribeToolType::PEN, ScribeEventAction::DOWN, 150.0f, 350.0f, 0.5f, 0.0f, 0.0f, false, 400.0 });
+    app.handleInputEvent({ ScribeToolType::PEN, ScribeEventAction::MOVE, 400.0f, 520.0f, 0.5f, 0.0f, 0.0f, false, 416.0 });
+    app.handleInputEvent({ ScribeToolType::PEN, ScribeEventAction::UP,   400.0f, 520.0f, 0.0f, 0.0f, 0.0f, false, 432.0 });
+    ASSERT_TRUE(wn_session_has_selection(app.engineHandle()), "Expected active selection around stroke");
+
+    // Tap Duplicate on Selection Action Bar (button 1 of 4, kSelBarW = 440 -> x ~ kPillX + 165)
+    app.handleInputEvent({ ScribeToolType::FINGER, ScribeEventAction::DOWN,
+        static_cast<float>(KindleScribeApp::kPillX + 165), static_cast<float>(KindleScribeApp::kStripY + 20),
+        0.5f, 0.0f, 0.0f, false, 500.0 });
+    ASSERT_TRUE(app.strokeCount() == 2, "Expected 2 strokes after selection duplicate");
+
+    // 5. Verify new RPC builder & agendaLabel parsing
+    std::string updJson = buildNodeUpdateHeaderJson(9, "id:123", "NEXT", "A");
+    ASSERT_TRUE(extractJsonStringField(updJson, "method") == "node.updateHeader", "Expected node.updateHeader method");
+    ASSERT_TRUE(extractJsonStringField(updJson, "todoKeyword") == "NEXT", "Expected NEXT todoKeyword");
+
+    std::string agendaResp =
+        "{\"result\":{\"nodes\":[{\"nodeId\":\"id:a1\",\"title\":\"Standup\","
+        "\"todoKeyword\":\"TODO\",\"agendaLabel\":\"10:30\",\"level\":2,\"sketchCount\":1}]}}";
+    auto summaries = parseNodeSummariesJson(agendaResp);
+    ASSERT_TRUE(summaries.size() == 1 && summaries[0].agendaLabel == "10:30", "Expected agendaLabel 10:30 parsed");
+
+    // 6. Verify multi-sketch switching
+    OrgNodeSnapshotData multiSnap;
+    multiSnap.nodeId = "id:multi";
+    multiSnap.title  = "Multi Sketch Node";
+    InkBlockInfo b1; b1.fileName = "sketch-1.svgz"; b1.width = 1200; b1.height = 928;
+    InkBlockInfo b2; b2.fileName = "sketch-2.svgz"; b2.width = 1200; b2.height = 928;
+    multiSnap.inkBlocks = { b1, b2 };
+    ASSERT_TRUE(app.applyNodeSnapshot(multiSnap), "Failed to apply multi-sketch snapshot");
+    ASSERT_TRUE(app.switchSketchIndex(1), "switchSketchIndex(1) should succeed with 2 blocks");
+
+    app.syncClient().clearOfflineQueue();
+    std::printf("  [PASS] testCollapsibleToolbarSelectionAndTier1Features\n");
+}
+
+void testConnectionStatusIcon() {
+    EinkFramebuffer fb;
+    ASSERT_TRUE(fb.openDevice("/dev/null", 200, 100), "Failed to open simulator framebuffer");
+    fb.clear(0xFF);
+    fb.drawCircle(50, 50, 6, 0x00, /*filled=*/true, 2);
+    ASSERT_TRUE(fb.getPixelGray(50, 50) == 0x00, "Filled circle center should be black");
+    ASSERT_TRUE(fb.getPixelGray(55, 50) == 0x00, "Filled circle edge should be black");
+
+    fb.clear(0xFF);
+    fb.drawCircle(120, 50, 6, 0x00, /*filled=*/false, 2);
+    ASSERT_TRUE(fb.getPixelGray(120, 50) == 0xFF, "Hollow ring center should remain white");
+    ASSERT_TRUE(fb.getPixelGray(125, 50) == 0x00, "Hollow ring border should be black");
+
+    KindleScribeApp app("/dev/null", "/tmp/org_writenotes_kindle_test_icon_q", 1860, 2480);
+    ASSERT_TRUE(app.initialize(), "Failed to initialize KindleScribeApp for icon test");
+    app.renderFullScreen(false);
+    const int iconCx = KindleScribeApp::kPillX + 50 + 96 + 78 + 78 + 14;
+    const int iconCy = KindleScribeApp::kPillY + KindleScribeApp::kPillHeight / 2;
+    ASSERT_TRUE(app.framebuffer().getPixelGray(iconCx, iconCy) >= 0xF0,
+        "Disconnected pill status icon should be a hollow ring");
+    ASSERT_TRUE(app.framebuffer().getPixelGray(iconCx + 5, iconCy) <= 0x10,
+        "Disconnected pill status icon ring border should be black");
+
+    // Live connected: solid dot (center black)
+    app.setCachedStatusForTest(/*connected=*/true, /*hasConflicts=*/false);
+    app.renderFullScreen(false);
+    ASSERT_TRUE(app.framebuffer().getPixelGray(iconCx, iconCy) <= 0x10,
+        "Live pill status icon should be a solid dot");
+
+    // Connected with conflicts: ring with center dot, ring gap in between stays light
+    app.setCachedStatusForTest(/*connected=*/true, /*hasConflicts=*/true);
+    app.renderFullScreen(false);
+    ASSERT_TRUE(app.framebuffer().getPixelGray(iconCx, iconCy) <= 0x10, "Conflict icon should have a center dot");
+    ASSERT_TRUE(app.framebuffer().getPixelGray(iconCx + 3, iconCy) >= 0xF0, "Conflict icon should have a light gap");
+    ASSERT_TRUE(app.framebuffer().getPixelGray(iconCx + 5, iconCy) <= 0x10, "Conflict icon should have a ring border");
+    app.setCachedStatusForTest(false, false);
+    std::printf("  [PASS] testConnectionStatusIcon\n");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -326,6 +446,8 @@ int main(int argc, char** argv) {
     testWacomRotationAndPalmRejection();
     testEinkWaveformsAndAppWorkflow();
     testServerSnapshotSyncAndUniformCanvasScaling();
+    testCollapsibleToolbarSelectionAndTier1Features();
+    testConnectionStatusIcon();
     std::printf("All Kindle Scribe tests passed!\n");
     return 0;
 }

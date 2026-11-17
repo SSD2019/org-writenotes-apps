@@ -225,6 +225,24 @@ std::string buildFlagFlashcardJson(int id, const std::string& nodeId, const std:
     return oss.str();
 }
 
+std::string buildNodeUpdateHeaderJson(
+    int id,
+    const std::string& nodeId,
+    const std::string& todoKeyword,
+    const std::string& priority
+) {
+    std::ostringstream oss;
+    oss << "{\"jsonrpc\":\"2.0\",\"id\":" << id
+        << ",\"method\":\"node.updateHeader\",\"params\":{"
+        << "\"nodeId\":\"" << jsonEscape(nodeId) << "\","
+        << "\"todoKeyword\":\"" << jsonEscape(todoKeyword) << "\"";
+    if (!priority.empty()) {
+        oss << ",\"priority\":\"" << jsonEscape(priority) << "\"";
+    }
+    oss << "}}";
+    return oss.str();
+}
+
 std::string extractJsonStringField(const std::string& json, const std::string& key) {
     std::string needle = "\"" + key + "\"";
     size_t pos = json.find(needle);
@@ -422,6 +440,8 @@ std::vector<OrgNodeSummary> parseNodeSummariesJson(const std::string& responseJs
         if (s.todoKeyword == "null") s.todoKeyword.clear();
         s.scheduled   = extractJsonStringField(obj, "scheduled");
         if (s.scheduled == "null") s.scheduled.clear();
+        s.agendaLabel = extractJsonStringField(obj, "agendaLabel");
+        if (s.agendaLabel == "null") s.agendaLabel.clear();
         s.level       = extractJsonIntField(obj, "level", 1);
         s.sketchCount = extractJsonIntField(obj, "sketchCount", 0);
         if (!s.nodeId.empty()) {
@@ -818,6 +838,26 @@ bool WriteNotesSyncClient::insertInkBlock(
         }
     }
     return true;
+}
+
+bool WriteNotesSyncClient::updateNodeHeader(
+    const std::string& nodeId,
+    const std::string& todoKeyword,
+    const std::string& priority
+) {
+    if (!isConnected() || nodeId.empty()) return false;
+    int rpcId = m_nextRpcId++;
+    std::string req = buildNodeUpdateHeaderJson(rpcId, nodeId, todoKeyword, priority);
+    std::string resp;
+    return sendRpcRequest(rpcId, req, &resp, 3000) && resp.find("\"error\"") == std::string::npos;
+}
+
+bool WriteNotesSyncClient::flagFlashcard(const std::string& nodeId, const std::string& fileName, bool flagged) {
+    if (!isConnected() || nodeId.empty()) return false;
+    int rpcId = m_nextRpcId++;
+    std::string req = buildFlagFlashcardJson(rpcId, nodeId, fileName, flagged);
+    std::string resp;
+    return sendRpcRequest(rpcId, req, &resp, 3000) && resp.find("\"error\"") == std::string::npos;
 }
 
 bool WriteNotesSyncClient::pollServerNotification(

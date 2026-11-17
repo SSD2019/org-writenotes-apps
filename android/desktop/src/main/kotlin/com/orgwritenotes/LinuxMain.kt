@@ -474,6 +474,7 @@ fun LinuxPopupSketchEditorScreen(
                         fontSize = 14.sp,
                         fontFamily = FontFamily.Monospace
                     )
+                    com.orgwritenotes.ui.ConnectionDot(state = connectionState, size = 10.dp)
                     Text(
                         text = "• $lastSavedTimeText",
                         fontSize = 12.sp,
