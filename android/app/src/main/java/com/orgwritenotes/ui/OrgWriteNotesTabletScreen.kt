@@ -342,6 +342,7 @@ fun OrgWriteNotesTabletScreen(
         if (activeSnapshot != null && zoomedBlock != null) {
             WriteZoomedEditorOverlay(
                 nodeId = activeSnapshot!!.nodeId,
+                nodeTitle = activeSnapshot!!.header.title,
                 block = zoomedBlock,
                 syncClient = syncClient,
                 sourceInlineView = ui.zoomedSourceView,

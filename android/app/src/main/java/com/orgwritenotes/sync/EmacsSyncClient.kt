@@ -1360,7 +1360,10 @@ class EmacsSyncClient(
 
     private fun updateActiveSnapshot(obj: JSONObject) {
         val prev = _activeSnapshot.value
-        val snap = preservePendingInk(parseSnapshot(obj))
+        val parsed = parseSnapshot(obj)
+        // A refile gives the same heading (and its sketches) a new nodeId; queued ink must follow it.
+        if (prev != null && prev.nodeId != parsed.nodeId) rebindMovedSketches(prev, parsed)
+        val snap = preservePendingInk(parsed)
         _activeSnapshot.value = snap
         if (prev != null && prev.nodeId == snap.nodeId) {
             val prevInk = prev.blocks.filterIsInstance<OrgBlock.InkCanvasBlock>().associateBy { it.fileName }
@@ -1381,6 +1384,33 @@ class EmacsSyncClient(
                 saveCachedSummariesToDisk(updatedHistory)
             }
         }
+    }
+
+    /**
+     * After a refile Emacs reports the node under a new id. Sketch file names are unique, so a sketch
+     * present in both the old and new snapshot is the same one: re-point its pending/queued ink commits
+     * (and conflict bookkeeping) at the new id, otherwise they'd be written back to the previous location.
+     */
+    private fun rebindMovedSketches(prev: OrgNodeSnapshot, next: OrgNodeSnapshot) {
+        val oldId = prev.nodeId
+        val newId = next.nodeId
+        if (oldId.isEmpty() || newId.isEmpty()) return
+        val moved = prev.blocks.filterIsInstance<OrgBlock.InkCanvasBlock>().map { it.fileName }.toSet()
+            .intersect(next.blocks.filterIsInstance<OrgBlock.InkCanvasBlock>().map { it.fileName }.toSet())
+        if (moved.isEmpty()) return
+        for (file in moved) {
+            pendingInkCommits.computeIfPresent(file) { _, p -> if (p.nodeId == oldId) p.copy(nodeId = newId) else p }
+            conflictNodeIds.computeIfPresent(file) { _, id -> if (id == oldId) newId else id }
+        }
+        val rebound = offlineMutationQueue.map { item ->
+            if (item.nodeId == oldId && item.fileName in moved) {
+                val params = runCatching { JSONObject(item.paramsJson).put("nodeId", newId) }.getOrNull()
+                if (params != null) queuedMutation(item.method, params) else item
+            } else item
+        }
+        offlineMutationQueue.clear()
+        offlineMutationQueue.addAll(rebound)
+        persistOfflineQueueToDisk()
     }
 
     /**

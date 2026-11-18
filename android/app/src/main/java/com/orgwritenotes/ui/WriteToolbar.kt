@@ -68,6 +68,7 @@ fun WriteSharedToolbarChrome(
     canRedo: Boolean,
     hasSelection: Boolean,
     isZoomedFullScreen: Boolean,
+    nodeTitle: String? = null,
     showLabels: Boolean = false,
     isAutoHidePinned: Boolean = false,
     snapToGrid: Boolean = false,
@@ -182,10 +183,14 @@ fun WriteSharedToolbarChrome(
             // Active Drawing Title Badge
             Column(modifier = Modifier.padding(end = 6.dp)) {
                 Text(
-                    text = "Canvas • ${WriteTemplateStyle.fromNativeCode(pageSetup.rulingStyle).label}",
+                    text = nodeTitle?.takeIf { it.isNotBlank() }
+                        ?: "Canvas • ${WriteTemplateStyle.fromNativeCode(pageSetup.rulingStyle).label}",
                     color = accentColor,
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 220.dp)
                 )
                 Text(
                     text = "${pageSetup.width}×${pageSetup.height} • ${pageSetup.strokeCount} strokes",

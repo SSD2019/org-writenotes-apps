@@ -37,6 +37,7 @@ import com.orgwritenotes.sync.EmacsSyncClient
 @Composable
 fun WriteZoomedEditorOverlay(
     nodeId: String,
+    nodeTitle: String? = null,
     block: OrgBlock.InkCanvasBlock,
     syncClient: EmacsSyncClient,
     sourceInlineView: WriteCanvasBlockView? = null,
@@ -172,6 +173,7 @@ fun WriteZoomedEditorOverlay(
                 canRedo = canRedo,
                 hasSelection = selectionState.hasSelection,
                 isZoomedFullScreen = true,
+                nodeTitle = nodeTitle,
                 snapToGrid = snapToGrid,
                 lineDrawing = lineDrawing,
                 pressureEnabled = pressureEnabled,
